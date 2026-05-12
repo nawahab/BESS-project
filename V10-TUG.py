@@ -13,24 +13,24 @@ Outputs:
 - debug csv: <name>_signals_debug.csv
 """
 
-import os
-import math
-import urllib.request
-from dataclasses import dataclass
+import os # standard library, no pip install needed
+import math 
+import urllib.request # standard library, no pip install needed
+from dataclasses import dataclass # standard library, no pip install needed
 
-import cv2
-import numpy as np
-import pandas as pd
-from scipy.signal import savgol_filter
+import cv2 # pip install opencv-python, version = 4.13.0.92
+import numpy as np # pip install numpy, version = 1.26.4
+import pandas as pd # pip install pandas, version = 2.3.3
+from scipy.signal import savgol_filter # pip install scipy, version = 1.15.3
 
-import mediapipe as mp
+import mediapipe as mp # pip install mediapipe, version = 0.10.35
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 # ==========================================
 # VIDEO SELECTION
 # ==========================================
-import tkinter as tk
+import tkinter as tk # standard library, no pip install needed
 from tkinter import filedialog
 
 
