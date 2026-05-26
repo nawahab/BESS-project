@@ -191,14 +191,14 @@ def detect():
             print("we calculated ratios")
 
             # visualize the left eye ratio at the left eye center
-            cv2.putText(image, str(left_ratio),
+            cv2.putText(image, str(left_ratio)[:5],
                             tuple(np.multiply(LC[:2], [640, 480]).astype(int)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA
                             )
             print("we put text 1")
             
             # visualize the right eye ratio at the right eye center
-            cv2.putText(image, str(right_ratio),
+            cv2.putText(image, str(right_ratio)[:5],
                             tuple(np.multiply(RC[:2], [640, 480]).astype(int)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA
                             )
@@ -223,7 +223,7 @@ def detect():
         """
 
         # render the image
-        cv2.imshow('Mediapipe Feed', frame)
+        cv2.imshow('Mediapipe Feed', image)
 
         if cv2.waitKey(25) & 0xFF == ord('q'):
             break
