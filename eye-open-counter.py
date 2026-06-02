@@ -51,6 +51,36 @@ def calculate_aspect_ratio(landmarks, top_idx, bottom_idx, inner_idx, outer_idx,
         return 0.0
     return vertical / horizontal
 
+""" Draw the face landmarks and connections """
+def draw_landmarks_and_connections(image, results):
+    if not results.face_landmarks:
+        return
+
+    h, w, _ = image.shape
+
+    for face_landmarks in results.face_landmarks:
+        """# Draw connections
+        for start_idx, end_idx in POSE_CONNECTIONS:
+            start = pose_landmarks[start_idx]
+            end = pose_landmarks[end_idx]
+
+            if start.visibility > 0.5 and end.visibility > 0.5:
+                cv2.line(image,
+                    (int(start.x * w), int(start.y * h)),
+                    (int(end.x * w), int(end.y * h)),
+                    (255, 0, 255), 2)"""
+
+        # Draw landmark dots
+        for landmark in face_landmarks:
+            try:
+                if landmark.visibility > 0.5:
+                    cv2.circle(image,
+                        (int(landmark.x * w), int(landmark.y * h)),
+                        4, (255, 255, 0), -1)
+            except:
+                pass
+    return
+
 """ Opens live video feed from camera. Counts how many times you open your eyes from closed. """
 def detect():
     cap = cv2.VideoCapture(0)
@@ -114,6 +144,9 @@ def detect():
             if avg_aspect_ratio > EAR_THRESHOLD and stage == "EYES CLOSED":
                 stage = "EYES OPEN"
                 counter += 1
+                
+            # draw face landmarks
+            draw_landmarks_and_connections(image, results)
                 
             # Display EAR values
             # Colors are in (B, G, R) format.
