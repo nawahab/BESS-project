@@ -1029,7 +1029,6 @@ def render_plots(frame_data_list, current_idx: int, plot_w=PLOT_W, plot_h=PLOT_H
 DISPLAY_H = 960   # height to resize video to for display
 
 def run_video_analysis():
-    # select the video and imu files
     video_path, imu_path = select_video_and_imu()
 
     print("Processing video... this may take a minute.")
@@ -1040,13 +1039,25 @@ def run_video_analysis():
     display_w = int(raw_w * scale)
     display_h = DISPLAY_H
 
-    delay_ms  = max(1, int(1000 / fps))
-    n_frames  = len(frames_bgr)
+    # output path: same folder as input, same name + "_analysis.mp4"
+    base        = os.path.splitext(video_path)[0]
+    output_path = base + "_analysis.mp4"
 
-    print(f"Playback starting. Press Q to quit.")
+    # combined frame size is the video width + plot width
+    combined_w = display_w + PLOT_W
+    combined_h = display_h
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(output_path, fourcc, fps, (combined_w, combined_h))
+
+    if not writer.isOpened():
+        raise RuntimeError(f"Could not open VideoWriter")
+
+    n_frames = len(frames_bgr)
+    print(f"Writing {n_frames} frames to {output_path} ...")
 
     for i, frame in enumerate(frames_bgr):
-        # resize video frame
+        # resize video frame to display height
         vid_frame = cv2.resize(frame, (display_w, display_h))
 
         # render plots panel
@@ -1056,7 +1067,7 @@ def run_video_analysis():
         # stitch side by side
         combined = np.hstack([vid_frame, plot_panel])
 
-        # HUD overlay on video side
+        # HUD overlay
         fd = frame_data_list[i]
         t_rel = (fd.timestamp_ms - TRIAL_START_MS) / 1000.0
         if fd.in_trial:
@@ -1066,16 +1077,18 @@ def run_video_analysis():
             label = "PRE-TRIAL"
             color = (128, 128, 128)
 
+        # top left corner
         cv2.putText(combined, label, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
         cv2.putText(combined, f"AR: {fd.avg_ar:.3f}", (10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-        cv2.imshow("BESS Analysis", combined)
+        writer.write(combined)
 
-        key = cv2.waitKey(delay_ms) & 0xFF
-        if key == ord('q'):
-            break
+        if i % 30 == 0:
+            print(f"  Writing frame {i}/{n_frames} ({100*i//n_frames}%)")
 
-    cv2.destroyAllWindows()
-    print("Playback complete.")
+    writer.release()
+    print(f"Done. Saved to: {output_path}")
+    
+print("running")
