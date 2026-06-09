@@ -261,6 +261,7 @@ def detect_hands_off_hips(pose_landmarks, calib: CalibrationData) -> bool:
 
                                     ############################# STUMBLE / SWAY #############################
 
+
 """ landmark indices for MediaPipe PoseLandmarker (33-point model) """
 LEFT_ANKLE  = 27
 RIGHT_ANKLE = 28
@@ -268,7 +269,7 @@ LEFT_SHOULDER  = 11
 RIGHT_SHOULDER = 12
 
 """ global stumble and sway thresholds """
-STUMBLE_THRESHOLD = 0.03   # normalized units — tune with testing
+STUMBLE_THRESHOLD = 0.03   # normalized units; tune with testing
 SWAY_THRESHOLD    = 0.015  # subtle sway is a smaller threshold
 
 """ a class that keeps a rolling list of the last 5 x-coordinates for: 
@@ -690,3 +691,24 @@ def run_trial():
     cap.release()
     cv2.destroyAllWindows()
     return trial
+
+def select_video_and_imu():
+    root = tk.Tk()
+    root.withdraw()
+
+    video_path = filedialog.askopenfilename(
+        title="Select BESS Video",
+        filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv")]
+    )
+    if not video_path:
+        raise RuntimeError("No video selected.")
+
+    imu_path = filedialog.askopenfilename(
+        title="Select IMU Data File",
+        filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+    )
+    if not imu_path:
+        print("Warning: No IMU file selected. Stabilization will be skipped.")
+        imu_path = None
+
+    return video_path, imu_path
