@@ -823,7 +823,7 @@ class FrameData:
 
 """
 We're going to run MediaPipe on every frame, buffer FrameData.
-Returns (frames_bgr, frame_data_list).
+Returns (frames_bgr, frame_data_list, fps, img_w, img_h).
 """
 def process_video(video_path: str, imu_path: str) -> tuple:
     
@@ -872,5 +872,62 @@ def process_video(video_path: str, imu_path: str) -> tuple:
         )
     )
 
+    # for plotting
     frames_bgr     = [] # array of BGR (cv2 format) frames
+    frame_data_list = [] # array of frame data
+
+    frame_idx = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        timestamp_ms = (frame_idx / fps) * 1000.0
+
+        # calling stabilize_frame
+        if imu_loaded:
+            angle = get_angle_at(rotation_angles,
+                                 np.array(list(rotation_angles.keys())),
+                                 timestamp_ms)
+            frame = stabilize_frame(frame, angle)
+
+        rgb    = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        ts_int = int(timestamp_ms)
+
+        face_results = face_landmarker.detect_for_video(mp_img, ts_int)
+        pose_results = pose_landmarker.detect_for_video(mp_img, ts_int)
+
+        in_trial = TRIAL_START_MS <= timestamp_ms <= TRIAL_END_MS # are we currently in a trial?
+        fd = FrameData(timestamp_ms=timestamp_ms, in_trial=in_trial) # frame data instance
+
+        if face_results.face_landmarks: # proceed if face is detected
+            fd.face_detected = True
+            lm = face_results.face_landmarks[0]
+            left_ar  = calculate_aspect_ratio(lm, LEFT_EYE_TOP, LEFT_EYE_BOTTOM,
+                                               LEFT_EYE_INNER, LEFT_EYE_OUTER, img_w, img_h)
+            right_ar = calculate_aspect_ratio(lm, RIGHT_EYE_TOP, RIGHT_EYE_BOTTOM,
+                                               RIGHT_EYE_INNER, RIGHT_EYE_OUTER, img_w, img_h)
+            fd.avg_ar = (left_ar + right_ar) / 2
+
+        if pose_results.pose_landmarks: # proceed if pose landmarks are detected
+            fd.pose_detected = True
+            lm = pose_results.pose_landmarks[0]
+            
+            # here i'm trying tracking some landmarks -- SUBJECT TO CHANGE!! 
+            # figure out which landmarks to plot??? the most useful???
+            fd.shoulder_mid_x = (lm[LEFT_SHOULDER].x  + lm[RIGHT_SHOULDER].x)  / 2
+            fd.hip_mid_x      = (lm[LEFT_HIP].x       + lm[RIGHT_HIP].x)       / 2
+            fd.left_ankle_y   = lm[LEFT_ANKLE].y
+            fd.right_ankle_y  = lm[RIGHT_ANKLE].y
+
+        # append arrays and increment index counter
+        frames_bgr.append(frame.copy())
+        frame_data_list.append(fd)
+        frame_idx += 1
+        
+    cap.release()
+    face_landmarker.close()
+    pose_landmarker.close()
    
+    return frames_bgr, frame_data_list, fps, img_w, img_h
