@@ -1001,7 +1001,7 @@ def render_plots(frame_data_list, current_idx: int, plot_w=PLOT_W, plot_h=PLOT_H
         # right ankle overlay on ankle plot
         if label == "Ankle Y" and right_ank_ys:
             ax.plot(times, right_ank_ys, color="#ffdd88",
-                    linewidth=1.0, linestyle="--", label="R ankle")
+                    linewidth=1.0)
             ax.legend(fontsize=5, loc="upper right",
                       facecolor="#2a2a2a", labelcolor="white")
             
@@ -1080,8 +1080,6 @@ def run_video_analysis():
         # top left corner
         cv2.putText(combined, label, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-        cv2.putText(combined, f"AR: {fd.avg_ar:.3f}", (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         writer.write(combined)
 
