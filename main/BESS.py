@@ -29,6 +29,11 @@ from typing import List, Optional
 import time
 from enum import Enum
 
+import matplotlib
+matplotlib.use("Agg")  # plots directly into files rather than popping up a GUI window
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+
 # ==========================================
 # CONFIG
 # ==========================================
@@ -931,3 +936,146 @@ def process_video(video_path: str, imu_path: str) -> tuple:
     pose_landmarker.close()
    
     return frames_bgr, frame_data_list, fps, img_w, img_h
+
+# let's hard code dimensions for the plots
+PLOT_W = 480   # width of plot panel in pixels
+PLOT_H = 960   # height of plot panel
+
+
+"""
+render plots...
+"""
+def render_plots(frame_data_list, current_idx: int, plot_w=PLOT_W, plot_h=PLOT_H) -> np.ndarray:
+    
+    # collect trial data up to current frame
+    times      = []
+    avg_ars    = []
+    shoulder_xs = []
+    hip_xs     = []
+    left_ank_ys  = []
+    right_ank_ys = []
+    
+    for fd in frame_data_list[:current_idx + 1]:
+        if not fd.in_trial:
+            continue
+        t = (fd.timestamp_ms - TRIAL_START_MS) / 1000.0  # seconds into trial
+        times.append(t)
+        avg_ars.append(fd.avg_ar)
+        shoulder_xs.append(fd.shoulder_mid_x)
+        hip_xs.append(fd.hip_mid_x)
+        left_ank_ys.append(fd.left_ankle_y)
+        right_ank_ys.append(fd.right_ankle_y)
+        
+    dpi = 100 # resolution
+    fig_w = plot_w / dpi
+    fig_h = plot_h / dpi
+
+    fig, axes = plt.subplots(4, 1, figsize=(fig_w, fig_h), dpi=dpi)
+    fig.patch.set_facecolor("#000000") # black
+    
+    plot_configs = [
+        (axes[0], avg_ars,     "Avg Eye AR",      "#00aaff", (0, 0.5)),  # nice blue
+        (axes[1], shoulder_xs, "Shoulder X",       "#ffaa00", (0, 1.0)), # yellow
+        (axes[2], hip_xs,      "Hip X",            "#c52626", (0, 1.0)), # red
+        (axes[3], left_ank_ys, "Ankle Y",          "#44af26", (0, 1.0)), # green
+    ]
+
+    for ax, data, label, color, ylim in plot_configs:
+        ax.set_facecolor("#000000")
+        ax.set_xlim(0, 20)
+        ax.set_ylim(ylim)
+        ax.set_ylabel(label, color="white", fontsize=7)
+        ax.tick_params(colors="white", labelsize=6)
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#555555") #gray
+        ax.grid(True, color="#444444", linewidth=0.5) #gray
+
+        if times:
+            ax.plot(times, data, color=color, linewidth=1.2)
+
+        # threshold line for eye AR
+        if label == "Avg Eye AR":
+            ax.axhline(y=ASPECT_RATIO_THRESHOLD, color="#ff4444",
+                       linewidth=0.8, linestyle="--", label="threshold")
+
+        # right ankle overlay on ankle plot
+        if label == "Ankle Y" and right_ank_ys:
+            ax.plot(times, right_ank_ys, color="#ffdd88",
+                    linewidth=1.0, linestyle="--", label="R ankle")
+            ax.legend(fontsize=5, loc="upper right",
+                      facecolor="#2a2a2a", labelcolor="white")
+            
+    axes[3].set_xlabel("Time (s)", color="white", fontsize=7)
+    plt.tight_layout(pad=0.5)
+
+    # render to numpy array
+    fig.canvas.draw()
+    buf = fig.canvas.buffer_rgba()
+    img = np.asarray(buf) # what we're going to return
+    plt.close(fig)
+
+    # rgba -> bgr
+    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+
+    # resize to exact panel size
+    img_bgr = cv2.resize(img_bgr, (plot_w, plot_h))
+    
+    # returns the image of subplots
+    return img_bgr
+
+
+################ WRAPPER FUNCTION FOR RUNNING ANALYSIS ON A VIDEO #################
+
+DISPLAY_H = 960   # height to resize video to for display
+
+def run_video_analysis():
+    # select the video and imu files
+    video_path, imu_path = select_video_and_imu()
+
+    print("Processing video... this may take a minute.")
+    frames_bgr, frame_data_list, fps, raw_w, raw_h = process_video(video_path, imu_path)
+
+    # scale video to display height, preserve aspect ratio
+    scale     = DISPLAY_H / raw_h
+    display_w = int(raw_w * scale)
+    display_h = DISPLAY_H
+
+    delay_ms  = max(1, int(1000 / fps))
+    n_frames  = len(frames_bgr)
+
+    print(f"Playback starting. Press Q to quit.")
+
+    for i, frame in enumerate(frames_bgr):
+        # resize video frame
+        vid_frame = cv2.resize(frame, (display_w, display_h))
+
+        # render plots panel
+        plot_panel = render_plots(frame_data_list, i,
+                                  plot_w=PLOT_W, plot_h=display_h)
+
+        # stitch side by side
+        combined = np.hstack([vid_frame, plot_panel])
+
+        # HUD overlay on video side
+        fd = frame_data_list[i]
+        t_rel = (fd.timestamp_ms - TRIAL_START_MS) / 1000.0
+        if fd.in_trial:
+            label = f"TRIAL  {t_rel:.1f}s / 20.0s"
+            color = (0, 255, 255)
+        else:
+            label = "PRE-TRIAL"
+            color = (128, 128, 128)
+
+        cv2.putText(combined, label, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        cv2.putText(combined, f"AR: {fd.avg_ar:.3f}", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        cv2.imshow("BESS Analysis", combined)
+
+        key = cv2.waitKey(delay_ms) & 0xFF
+        if key == ord('q'):
+            break
+
+    cv2.destroyAllWindows()
+    print("Playback complete.")
