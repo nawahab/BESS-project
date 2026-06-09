@@ -712,3 +712,371 @@ def select_video_and_imu():
         imu_path = None
 
     return video_path, imu_path
+
+# ==========================================
+# VIDEO SELECTION
+# ==========================================
+
+def select_video_and_imu():
+    root = tk.Tk()
+    root.withdraw()
+
+    video_path = filedialog.askopenfilename(
+        title="Select BESS Video",
+        filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv")]
+    )
+    if not video_path:
+        raise RuntimeError("No video selected.")
+
+    imu_path = filedialog.askopenfilename(
+        title="Select IMU Data File",
+        filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+    )
+    if not imu_path:
+        print("Warning: No IMU file selected. Stabilization will be skipped.")
+        imu_path = None
+
+    return video_path, imu_path
+
+
+# ==========================================
+# IMU pROCESSING
+# ==========================================
+import json
+
+"""
+return an array of timestamps and gyro Z values from the imu data
+"""
+def load_imu(imu_path: str):
+    with open(imu_path, "r") as f:
+        raw = json.load(f)
+    timestamps = np.array([int(x) for x in raw.keys()])
+    gyro_z    = np.array([raw[k]["gyroZ"] for k in raw.keys()])
+    return timestamps, gyro_z
+
+""" 
+helper function to return the interpolated gyro z value given a timestamp
+"""
+def interpolate_gyro(timestamps, gyro_z, query_ms: float) -> float:
+    return float(np.interp(query_ms, timestamps, gyro_z))
+
+"""
+integrate gyro z over time to get cumulative rotation angle (radians)
+at each IMU timestamp. Returns a dictionary where:
+- keys are timestamp in ms
+- values are angle in radians.
+"""
+def build_rotation_angle(timestamps, gyro_z) -> dict:
+    
+    angles = {timestamps[0]: 0.0}
+    cumulative = 0.0
+    for i in range(1, len(timestamps)):
+        dt = (timestamps[i] - timestamps[i-1]) / 1000.0  # ms to seconds
+        cumulative += gyro_z[i] * dt
+        angles[timestamps[i]] = cumulative
+    return angles
+
+""" Helper function to interpolate cumulative rotation angle 
+at a given timestamp in ms.
+"""
+def get_angle_at(angles: dict, timestamps, query_ms: float) -> float:
+    ts_arr    = np.array(list(angles.keys()))
+    angle_arr = np.array(list(angles.values()))
+    return float(np.interp(query_ms, ts_arr, angle_arr))
+
+
+# ==========================================
+# FRAME STABILIZER
+# ==========================================
+
+def stabilize_frame(frame, angle_rad: float):
+    """
+    Apply counter-rotation to correct for camera tilt.
+    angle_rad: cumulative gyroZ rotation at this frame's timestamp.
+    """
+    h, w = frame.shape[:2]
+    cx, cy = w // 2, h // 2
+    # counter-rotate by negative of accumulated angle
+    deg = -np.degrees(angle_rad)
+    M = cv2.getRotationMatrix2D((cx, cy), deg, 1.0)
+    return cv2.warpAffine(frame, M, (w, h),
+                          flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_REPLICATE)
+
+
+# ==========================================
+# MEDIAPIPE PROCESSOR
+# ==========================================
+
+TRIAL_START_MS  = 1000.0   # hardcoded trial start
+TRIAL_END_MS    = TRIAL_START_MS + 20000.0
+
+@dataclass
+class FrameData:
+    timestamp_ms:   float
+    in_trial:       bool
+    avg_ar:         float = 0.0
+    shoulder_mid_x: float = 0.0
+    hip_mid_x:      float = 0.0
+    left_ankle_y:   float = 0.0
+    right_ankle_y:  float = 0.0
+    face_detected:  bool  = False
+    pose_detected:  bool  = False
+
+def process_video(video_path: str, imu_path: str) -> tuple:
+    """
+    Pass 1: run MediaPipe on every frame, buffer FrameData.
+    Returns (frames_bgr, frame_data_list).
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+
+    fps      = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total    = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    img_w    = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    img_h    = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    print(f"Video: {img_w}x{img_h} @ {fps:.1f}fps, {total} frames")
+
+    # --- IMU ---
+    imu_loaded = False
+    if imu_path:
+        try:
+            imu_timestamps, gyro_z = load_imu(imu_path)
+            rotation_angles = build_rotation_angle(imu_timestamps, gyro_z)
+            imu_loaded = True
+            print("IMU loaded successfully.")
+        except Exception as e:
+            print(f"IMU load failed: {e}. Stabilization skipped.")
+
+    # --- MediaPipe ---
+    face_landmarker = vision.FaceLandmarker.create_from_options(
+        vision.FaceLandmarkerOptions(
+            base_options=python.BaseOptions(model_asset_path=ensure_model(FACE_MODEL_PATH, FACE_MODEL_URL)),
+            running_mode=vision.RunningMode.VIDEO,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+    )
+    pose_landmarker = vision.PoseLandmarker.create_from_options(
+        vision.PoseLandmarkerOptions(
+            base_options=python.BaseOptions(model_asset_path=ensure_model(POSE_MODEL_PATH, POSE_MODEL_URL)),
+            running_mode=vision.RunningMode.VIDEO,
+            num_poses=1,
+            min_pose_detection_confidence=0.5,
+            min_pose_presence_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+    )
+
+    frames_bgr     = []
+    frame_data_list = []
+
+    frame_idx = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        timestamp_ms = (frame_idx / fps) * 1000.0
+
+        # --- stabilize ---
+        if imu_loaded:
+            angle = get_angle_at(rotation_angles,
+                                 np.array(list(rotation_angles.keys())),
+                                 timestamp_ms)
+            frame = stabilize_frame(frame, angle)
+
+        # --- mediapipe ---
+        rgb    = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        ts_int = int(timestamp_ms)
+
+        face_results = face_landmarker.detect_for_video(mp_img, ts_int)
+        pose_results = pose_landmarker.detect_for_video(mp_img, ts_int)
+
+        in_trial = TRIAL_START_MS <= timestamp_ms <= TRIAL_END_MS
+        fd = FrameData(timestamp_ms=timestamp_ms, in_trial=in_trial)
+
+        if face_results.face_landmarks:
+            fd.face_detected = True
+            lm = face_results.face_landmarks[0]
+            left_ar  = calculate_aspect_ratio(lm, LEFT_EYE_TOP, LEFT_EYE_BOTTOM,
+                                               LEFT_EYE_INNER, LEFT_EYE_OUTER, img_w, img_h)
+            right_ar = calculate_aspect_ratio(lm, RIGHT_EYE_TOP, RIGHT_EYE_BOTTOM,
+                                               RIGHT_EYE_INNER, RIGHT_EYE_OUTER, img_w, img_h)
+            fd.avg_ar = (left_ar + right_ar) / 2
+
+        if pose_results.pose_landmarks:
+            fd.pose_detected = True
+            lm = pose_results.pose_landmarks[0]
+            fd.shoulder_mid_x = (lm[LEFT_SHOULDER].x  + lm[RIGHT_SHOULDER].x)  / 2
+            fd.hip_mid_x      = (lm[LEFT_HIP].x       + lm[RIGHT_HIP].x)       / 2
+            fd.left_ankle_y   = lm[LEFT_ANKLE].y
+            fd.right_ankle_y  = lm[RIGHT_ANKLE].y
+
+        frames_bgr.append(frame.copy())
+        frame_data_list.append(fd)
+        frame_idx += 1
+
+        if frame_idx % 30 == 0:
+            print(f"  Processing frame {frame_idx}/{total} ({100*frame_idx//total}%)")
+
+    cap.release()
+    face_landmarker.close()
+    pose_landmarker.close()
+    print(f"Processing complete. {len(frames_bgr)} frames buffered.")
+    return frames_bgr, frame_data_list, fps, img_w, img_h
+
+
+# ==========================================
+# PLOT RENDERER
+# ==========================================
+
+import matplotlib
+matplotlib.use("Agg")  # off-screen rendering
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+
+PLOT_W = 480   # width of plot panel in pixels
+PLOT_H = 960   # height of plot panel — should match display height
+
+def render_plots(frame_data_list, current_idx: int, plot_w=PLOT_W, plot_h=PLOT_H) -> np.ndarray:
+    """
+    Render 4 stacked plots up to current_idx, only showing trial data.
+    Returns a BGR numpy array of shape (plot_h, plot_w, 3).
+    """
+    # collect trial data up to current frame
+    times      = []
+    avg_ars    = []
+    shoulder_xs = []
+    hip_xs     = []
+    left_ank_ys  = []
+    right_ank_ys = []
+
+    for fd in frame_data_list[:current_idx + 1]:
+        if not fd.in_trial:
+            continue
+        t = (fd.timestamp_ms - TRIAL_START_MS) / 1000.0  # seconds into trial
+        times.append(t)
+        avg_ars.append(fd.avg_ar)
+        shoulder_xs.append(fd.shoulder_mid_x)
+        hip_xs.append(fd.hip_mid_x)
+        left_ank_ys.append(fd.left_ankle_y)
+        right_ank_ys.append(fd.right_ankle_y)
+
+    dpi = 100
+    fig_w = plot_w / dpi
+    fig_h = plot_h / dpi
+
+    fig, axes = plt.subplots(4, 1, figsize=(fig_w, fig_h), dpi=dpi)
+    fig.patch.set_facecolor("#1e1e1e")
+
+    plot_configs = [
+        (axes[0], avg_ars,     "Avg Eye AR",      "#00ffcc", (0, 0.5)),
+        (axes[1], shoulder_xs, "Shoulder X",       "#ffaa00", (0, 1.0)),
+        (axes[2], hip_xs,      "Hip X",            "#ff6688", (0, 1.0)),
+        (axes[3], left_ank_ys, "Ankle Y",          "#88aaff", (0, 1.0)),
+    ]
+
+    for ax, data, label, color, ylim in plot_configs:
+        ax.set_facecolor("#2a2a2a")
+        ax.set_xlim(0, 20)
+        ax.set_ylim(ylim)
+        ax.set_ylabel(label, color="white", fontsize=7)
+        ax.tick_params(colors="white", labelsize=6)
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#555555")
+        ax.grid(True, color="#444444", linewidth=0.5)
+
+        if times:
+            ax.plot(times, data, color=color, linewidth=1.2)
+
+        # threshold line for eye AR
+        if label == "Avg Eye AR":
+            ax.axhline(y=ASPECT_RATIO_THRESHOLD, color="#ff4444",
+                       linewidth=0.8, linestyle="--", label="threshold")
+
+        # right ankle overlay on ankle plot
+        if label == "Ankle Y" and right_ank_ys:
+            ax.plot(times, right_ank_ys, color="#ffdd88",
+                    linewidth=1.0, linestyle="--", label="R ankle")
+            ax.legend(fontsize=5, loc="upper right",
+                      facecolor="#2a2a2a", labelcolor="white")
+
+    axes[3].set_xlabel("Time (s)", color="white", fontsize=7)
+    plt.tight_layout(pad=0.5)
+
+    # render to numpy array
+    fig.canvas.draw()
+    buf = fig.canvas.buffer_rgba()
+    img = np.asarray(buf)
+    plt.close(fig)
+
+    # rgba -> bgr
+    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+
+    # resize to exact panel size
+    img_bgr = cv2.resize(img_bgr, (plot_w, plot_h))
+    return img_bgr
+
+
+# ==========================================
+# MAIN PLAYBACK LOOP
+# ==========================================
+
+DISPLAY_H = 960   # height to resize video to for display
+
+def run_video_analysis():
+    video_path, imu_path = select_video_and_imu()
+
+    print("Processing video... this may take a minute.")
+    frames_bgr, frame_data_list, fps, raw_w, raw_h = process_video(video_path, imu_path)
+
+    # scale video to display height, preserve aspect ratio
+    scale     = DISPLAY_H / raw_h
+    display_w = int(raw_w * scale)
+    display_h = DISPLAY_H
+
+    delay_ms  = max(1, int(1000 / fps))
+    n_frames  = len(frames_bgr)
+
+    print(f"Playback starting. Press Q to quit.")
+
+    for i, frame in enumerate(frames_bgr):
+        # resize video frame
+        vid_frame = cv2.resize(frame, (display_w, display_h))
+
+        # render plots panel
+        plot_panel = render_plots(frame_data_list, i,
+                                  plot_w=PLOT_W, plot_h=display_h)
+
+        # stitch side by side
+        combined = np.hstack([vid_frame, plot_panel])
+
+        # HUD overlay on video side
+        fd = frame_data_list[i]
+        t_rel = (fd.timestamp_ms - TRIAL_START_MS) / 1000.0
+        if fd.in_trial:
+            label = f"TRIAL  {t_rel:.1f}s / 20.0s"
+            color = (0, 255, 255)
+        else:
+            label = "PRE-TRIAL"
+            color = (128, 128, 128)
+
+        cv2.putText(combined, label, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        cv2.putText(combined, f"AR: {fd.avg_ar:.3f}", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        cv2.imshow("BESS Analysis", combined)
+
+        key = cv2.waitKey(delay_ms) & 0xFF
+        if key == ord('q'):
+            break
+
+    cv2.destroyAllWindows()
+    print("Playback complete.")
