@@ -509,193 +509,6 @@ COUNTDOWN_DURATION = 5.0   # seconds
 TRIAL_DURATION     = 20.0  # seconds
 CALIBRATION_FRAMES = 180    # ~6 seconds at 30fps
 
-""" Run the trial. """
-def run_trial():
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        raise RuntimeError("Could not open camera")
-
-    img_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    img_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    # --- build face landmarker ---
-    face_model_path = ensure_model(FACE_MODEL_PATH, FACE_MODEL_URL)
-    face_options = vision.FaceLandmarkerOptions(
-        base_options=python.BaseOptions(model_asset_path=face_model_path),
-        running_mode=vision.RunningMode.VIDEO,
-        num_faces=1,
-        min_face_detection_confidence=0.5,
-        min_face_presence_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
-    face_landmarker = vision.FaceLandmarker.create_from_options(face_options)
-
-    # --- build pose landmarker ---
-    pose_model_path = ensure_model(POSE_MODEL_PATH, POSE_MODEL_URL)
-    pose_options = vision.PoseLandmarkerOptions(
-        base_options=python.BaseOptions(model_asset_path=pose_model_path),
-        running_mode=vision.RunningMode.VIDEO,
-        num_poses=1,
-        min_pose_detection_confidence=0.5,
-        min_pose_presence_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
-    pose_landmarker = vision.PoseLandmarker.create_from_options(pose_options)
-
-    # --- trial data, hard coded for now. ---
-    trial = TrialResult(stance="DOUBLE_LEG", surface="FIRM")
-
-    # --- debounce states, one per error type ---
-    db_eyes      = DebounceState()
-    db_hands     = DebounceState()
-    db_stumble   = DebounceState()
-    db_abduction = DebounceState()
-    db_foot      = DebounceState()
-
-    # --- pose tracking ---
-    pose_history  = PoseHistory()
-    calib_data    = CalibrationData()
-    foot_baseline = FootBaseline()
-    calib_frame_count = 0
-
-    # --- state machine ---
-    state             = TrialState.IDLE # start at idle
-    countdown_start   = None
-    trial_start       = None
-    start_time        = time.time()
-    avg_ar            = 0.0
-
-    while cap.isOpened():
-        ok, frame = cap.read()
-        if not ok:
-            break
-
-        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image)
-        timestamp_ms = int((time.time() - start_time) * 1000)
-
-        face_results = face_landmarker.detect_for_video(mp_image, timestamp_ms)
-        pose_results = pose_landmarker.detect_for_video(mp_image, timestamp_ms)
-
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-
-        face_detected = bool(face_results.face_landmarks)
-        pose_detected = bool(pose_results.pose_landmarks)
-
-        now = time.time()
-        countdown_remaining = 0.0
-        trial_remaining     = 0.0
-        active_errors = {
-            "EYES_OPEN":   False,
-            "HANDS_OFF_HIPS": False,
-            "STUMBLE_SWAY":  False,
-            "HIP_ABDUCTION": False,
-            "FOOT_LIFT":     False,
-        }
-
-        # ==========================================
-        # STATE TRANSITIONS
-        # ==========================================
-
-        ## 1. IDLE. until face is detected. most likely immediately.
-        if state == TrialState.IDLE:
-            ## START CALIBRATING AS SOON AS FACE IS DETECTED
-            if face_detected:
-                state = TrialState.CALIBRATING
-                calib_frame_count = 0
-                
-        ## 2. CALBIRATING. 3 seconds.
-        elif state == TrialState.CALIBRATING:
-            if pose_detected:
-                calib_frame_count += 1
-                # accumulate calibration over CALIBRATION_FRAMES, average at the end
-                lm = pose_results.pose_landmarks
-                left_dist  = get_normalized_distance(lm[0][LEFT_WRIST], lm[0][LEFT_HIP])
-                right_dist = get_normalized_distance(lm[0][RIGHT_WRIST], lm[0][RIGHT_HIP])
-                calib_data.left_wrist_hip_dist  = (calib_data.left_wrist_hip_dist  * (calib_frame_count - 1) + left_dist)  / calib_frame_count
-                calib_data.right_wrist_hip_dist = (calib_data.right_wrist_hip_dist * (calib_frame_count - 1) + right_dist) / calib_frame_count
-                foot_baseline = calibrate_foot_baseline(lm)
-
-            if calib_frame_count >= CALIBRATION_FRAMES:
-                state = TrialState.COUNTDOWN
-                countdown_start = now
-
-        ## 3. COUNTDOWN to start the trial. 5 seconds
-        elif state == TrialState.COUNTDOWN:
-            countdown_remaining = max(0.0, COUNTDOWN_DURATION - (now - countdown_start))
-            if countdown_remaining <= 0.0:
-                state = TrialState.RUNNING
-                trial.start_time = now
-                trial_start = now
-
-        ## 4. RUNNING the trial. 20 seconds
-        elif state == TrialState.RUNNING:
-            trial_remaining = max(0.0, TRIAL_DURATION - (now - trial_start))
-
-            # --- run all error detectors ---
-            if face_detected:
-                eyes_open, avg_ar = detect_eye_error(face_results.face_landmarks[0], img_w, img_h)
-                db_eyes = update_debounce(db_eyes, eyes_open, "EYES_OPEN", trial)
-                active_errors["EYES_OPEN"] = db_eyes.active
-
-
-            if pose_detected:
-                pose_history = update_pose_history(pose_history, pose_results.pose_landmarks)
-
-                hands_off = detect_hands_off_hips(pose_results.pose_landmarks, calib_data)
-                db_hands  = update_debounce(db_hands, hands_off, "HANDS_OFF_HIPS", trial)
-                active_errors["HANDS_OFF_HIPS"] = db_hands.active
-
-                stumble = detect_stumble(pose_history) or detect_sway(pose_history)
-                db_stumble = update_debounce(db_stumble, stumble, "STUMBLE_SWAY", trial)
-                active_errors["STUMBLE_SWAY"] = db_stumble.active
-
-                abduction = detect_hip_abduction(pose_results.pose_landmarks)
-                db_abduction = update_debounce(db_abduction, abduction, "HIP_ABDUCTION", trial)
-                active_errors["HIP_ABDUCTION"] = db_abduction.active
-
-                foot = detect_foot_lift(pose_results.pose_landmarks, foot_baseline)
-                db_foot = update_debounce(db_foot, foot, "FOOT_LIFT", trial)
-                active_errors["FOOT_LIFT"] = db_foot.active
-
-                draw_landmarks_and_connections(image, pose_results)
-
-            if trial_remaining <= 0.0:
-                trial.end_time = now
-                state = TrialState.COMPLETE
-
-        elif state == TrialState.COMPLETE:
-            pass  # just display HUD until spacebar
-
-        # ==========================================
-        # HUD + DISPLAY
-        # ==========================================
-        draw_hud(image, state, trial, avg_ar, countdown_remaining, trial_remaining, active_errors)
-
-        if state == TrialState.CALIBRATING:
-            cv2.putText(image, f"Calibrating... {calib_frame_count}/{CALIBRATION_FRAMES}",
-                        (10, img_h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-
-        if state == TrialState.IDLE:
-            cv2.putText(image, "Stand in front of camera to begin",
-                        (10, img_h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-        if state == TrialState.COUNTDOWN:
-            cv2.putText(image, "Get into position: feet together, hands on hips",
-                        (10, img_h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-
-        cv2.imshow("BESS Trial", image)
-
-        key = cv2.waitKey(25) & 0xFF
-        if key == ord('q'):
-            break
-        if key == ord(' ') and state == TrialState.COMPLETE:
-            save_results(trial)
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-    return trial
 
 def select_video_and_imu():
     root = tk.Tk()
@@ -1090,3 +903,195 @@ def run_video_analysis():
     print(f"Done. Saved to: {output_path}")
     
 print("running")
+
+
+
+################## LEGACY - WEBCAM VERSION ##################
+"""
+def run_trial():
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        raise RuntimeError("Could not open camera")
+
+    img_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    img_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # --- build face landmarker ---
+    face_model_path = ensure_model(FACE_MODEL_PATH, FACE_MODEL_URL)
+    face_options = vision.FaceLandmarkerOptions(
+        base_options=python.BaseOptions(model_asset_path=face_model_path),
+        running_mode=vision.RunningMode.VIDEO,
+        num_faces=1,
+        min_face_detection_confidence=0.5,
+        min_face_presence_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+    face_landmarker = vision.FaceLandmarker.create_from_options(face_options)
+
+    # --- build pose landmarker ---
+    pose_model_path = ensure_model(POSE_MODEL_PATH, POSE_MODEL_URL)
+    pose_options = vision.PoseLandmarkerOptions(
+        base_options=python.BaseOptions(model_asset_path=pose_model_path),
+        running_mode=vision.RunningMode.VIDEO,
+        num_poses=1,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+    pose_landmarker = vision.PoseLandmarker.create_from_options(pose_options)
+
+    # --- trial data, hard coded for now. ---
+    trial = TrialResult(stance="DOUBLE_LEG", surface="FIRM")
+
+    # --- debounce states, one per error type ---
+    db_eyes      = DebounceState()
+    db_hands     = DebounceState()
+    db_stumble   = DebounceState()
+    db_abduction = DebounceState()
+    db_foot      = DebounceState()
+
+    # --- pose tracking ---
+    pose_history  = PoseHistory()
+    calib_data    = CalibrationData()
+    foot_baseline = FootBaseline()
+    calib_frame_count = 0
+
+    # --- state machine ---
+    state             = TrialState.IDLE # start at idle
+    countdown_start   = None
+    trial_start       = None
+    start_time        = time.time()
+    avg_ar            = 0.0
+
+    while cap.isOpened():
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image)
+        timestamp_ms = int((time.time() - start_time) * 1000)
+
+        face_results = face_landmarker.detect_for_video(mp_image, timestamp_ms)
+        pose_results = pose_landmarker.detect_for_video(mp_image, timestamp_ms)
+
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+        face_detected = bool(face_results.face_landmarks)
+        pose_detected = bool(pose_results.pose_landmarks)
+
+        now = time.time()
+        countdown_remaining = 0.0
+        trial_remaining     = 0.0
+        active_errors = {
+            "EYES_OPEN":   False,
+            "HANDS_OFF_HIPS": False,
+            "STUMBLE_SWAY":  False,
+            "HIP_ABDUCTION": False,
+            "FOOT_LIFT":     False,
+        }
+
+        # ==========================================
+        # STATE TRANSITIONS
+        # ==========================================
+
+        ## 1. IDLE. until face is detected. most likely immediately.
+        if state == TrialState.IDLE:
+            ## START CALIBRATING AS SOON AS FACE IS DETECTED
+            if face_detected:
+                state = TrialState.CALIBRATING
+                calib_frame_count = 0
+                
+        ## 2. CALBIRATING. 3 seconds.
+        elif state == TrialState.CALIBRATING:
+            if pose_detected:
+                calib_frame_count += 1
+                # accumulate calibration over CALIBRATION_FRAMES, average at the end
+                lm = pose_results.pose_landmarks
+                left_dist  = get_normalized_distance(lm[0][LEFT_WRIST], lm[0][LEFT_HIP])
+                right_dist = get_normalized_distance(lm[0][RIGHT_WRIST], lm[0][RIGHT_HIP])
+                calib_data.left_wrist_hip_dist  = (calib_data.left_wrist_hip_dist  * (calib_frame_count - 1) + left_dist)  / calib_frame_count
+                calib_data.right_wrist_hip_dist = (calib_data.right_wrist_hip_dist * (calib_frame_count - 1) + right_dist) / calib_frame_count
+                foot_baseline = calibrate_foot_baseline(lm)
+
+            if calib_frame_count >= CALIBRATION_FRAMES:
+                state = TrialState.COUNTDOWN
+                countdown_start = now
+
+        ## 3. COUNTDOWN to start the trial. 5 seconds
+        elif state == TrialState.COUNTDOWN:
+            countdown_remaining = max(0.0, COUNTDOWN_DURATION - (now - countdown_start))
+            if countdown_remaining <= 0.0:
+                state = TrialState.RUNNING
+                trial.start_time = now
+                trial_start = now
+
+        ## 4. RUNNING the trial. 20 seconds
+        elif state == TrialState.RUNNING:
+            trial_remaining = max(0.0, TRIAL_DURATION - (now - trial_start))
+
+            # --- run all error detectors ---
+            if face_detected:
+                eyes_open, avg_ar = detect_eye_error(face_results.face_landmarks[0], img_w, img_h)
+                db_eyes = update_debounce(db_eyes, eyes_open, "EYES_OPEN", trial)
+                active_errors["EYES_OPEN"] = db_eyes.active
+
+
+            if pose_detected:
+                pose_history = update_pose_history(pose_history, pose_results.pose_landmarks)
+
+                hands_off = detect_hands_off_hips(pose_results.pose_landmarks, calib_data)
+                db_hands  = update_debounce(db_hands, hands_off, "HANDS_OFF_HIPS", trial)
+                active_errors["HANDS_OFF_HIPS"] = db_hands.active
+
+                stumble = detect_stumble(pose_history) or detect_sway(pose_history)
+                db_stumble = update_debounce(db_stumble, stumble, "STUMBLE_SWAY", trial)
+                active_errors["STUMBLE_SWAY"] = db_stumble.active
+
+                abduction = detect_hip_abduction(pose_results.pose_landmarks)
+                db_abduction = update_debounce(db_abduction, abduction, "HIP_ABDUCTION", trial)
+                active_errors["HIP_ABDUCTION"] = db_abduction.active
+
+                foot = detect_foot_lift(pose_results.pose_landmarks, foot_baseline)
+                db_foot = update_debounce(db_foot, foot, "FOOT_LIFT", trial)
+                active_errors["FOOT_LIFT"] = db_foot.active
+
+                draw_landmarks_and_connections(image, pose_results)
+
+            if trial_remaining <= 0.0:
+                trial.end_time = now
+                state = TrialState.COMPLETE
+
+        elif state == TrialState.COMPLETE:
+            pass  # just display HUD until spacebar
+
+        # ==========================================
+        # HUD + DISPLAY
+        # ==========================================
+        draw_hud(image, state, trial, avg_ar, countdown_remaining, trial_remaining, active_errors)
+
+        if state == TrialState.CALIBRATING:
+            cv2.putText(image, f"Calibrating... {calib_frame_count}/{CALIBRATION_FRAMES}",
+                        (10, img_h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+        if state == TrialState.IDLE:
+            cv2.putText(image, "Stand in front of camera to begin",
+                        (10, img_h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        if state == TrialState.COUNTDOWN:
+            cv2.putText(image, "Get into position: feet together, hands on hips",
+                        (10, img_h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+        cv2.imshow("BESS Trial", image)
+
+        key = cv2.waitKey(25) & 0xFF
+        if key == ord('q'):
+            break
+        if key == ord(' ') and state == TrialState.COMPLETE:
+            save_results(trial)
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    return trial
+"""
