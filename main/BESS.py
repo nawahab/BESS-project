@@ -64,14 +64,15 @@ def ensure_model(model_path, url):
             urllib.request.urlretrieve(url, model_path)
     return model_path
 
+
 # ==========================================
 # TIMING CONSTANTS
 # ==========================================
 
 COUNTDOWN_S      = 3.0                      # 3 second countdown before trial starts
 TRIAL_DURATION_S = 20.0                     # trial is 20 seconds long
-TRIAL_START_MS   = COUNTDOWN_S * 1000.0     # 
-TRIAL_END_MS     = TRIAL_START_MS + TRIAL_DURATION_S * 1000.0
+TRIAL_START_MS   = COUNTDOWN_S * 1000.0     # when the trial starts, in ms
+TRIAL_END_MS     = TRIAL_START_MS + (TRIAL_DURATION_S * 1000.0)     # when the trial ends, in ms
  
 # Calibrate from the last CALIB_WINDOW_S seconds *before* trial start, when the
 # subject is most likely already in the reference pose (feet together, hands on
@@ -80,74 +81,96 @@ CALIB_WINDOW_S = 1.0
 CALIB_START_MS = TRIAL_START_MS - CALIB_WINDOW_S * 1000.0  # e.g. 2.0 s
 CALIB_END_MS   = TRIAL_START_MS                            # e.g. 3.0 s
  
-# --- debounce -------------------------------------------------------------
 # An error must persist this long before it's committed (suppresses 1-frame flicker).
-DEBOUNCE_S = 0.20
+DEBOUNCE_S = 0.20 # 0.2 seconds
+DEBOUNCE_MS = 200 # 200 ms
 
 
-def draw_landmarks_and_connections(image, results):
-    if not results.pose_landmarks:
-        return
+# ==========================================
+# MEDIAPIPE CONSTANTS
+# ==========================================
 
-    h, w, _ = image.shape
+LEFT_EYE_TOP    = 159
+LEFT_EYE_BOTTOM = 145
+LEFT_EYE_INNER  = 133
+LEFT_EYE_OUTER  = 33
 
-    for pose_landmarks in results.pose_landmarks:
-        # Draw connections
-        for start_idx, end_idx in POSE_CONNECTIONS:
-            start = pose_landmarks[start_idx]
-            end = pose_landmarks[end_idx]
+RIGHT_EYE_TOP    = 386
+RIGHT_EYE_BOTTOM = 374
+RIGHT_EYE_INNER  = 362
+RIGHT_EYE_OUTER  = 263
 
-            if start.visibility > 0.5 and end.visibility > 0.5:
-                cv2.line(image,
-                    (int(start.x * w), int(start.y * h)),
-                    (int(end.x * w), int(end.y * h)),
-                    (255, 0, 255), 2)
+LEFT_SHOULDER  = 11
+RIGHT_SHOULDER = 12
 
-        # Draw landmark dots
-        for landmark in pose_landmarks:
-            try:
-                if landmark.visibility > 0.5:
-                    cv2.circle(image,
-                        (int(landmark.x * w), int(landmark.y * h)),
-                        4, (255, 255, 0), -1)
-            except:
-                pass
-    return
+LEFT_WRIST  = 15
+RIGHT_WRIST = 16
+
+LEFT_HIP    = 23
+RIGHT_HIP   = 24
+
+LEFT_KNEE  = 25
+RIGHT_KNEE = 26
+
+LEFT_ANKLE  = 27
+RIGHT_ANKLE = 28
+
+LEFT_HEEL = 29
+RIGHT_HEEL = 30
+
+LEFT_FOOT_INDEX  = 31
+RIGHT_FOOT_INDEX = 32
+
+
+# ==========================================
+# DATA MODELS
+# ==========================================
 
 """ There will be 5 possible errors, each corresponding to a state in the state machine:
 "EYES_OPEN", "HANDS_OFF_HIPS", "STUMBLE", "HIP_ABDUCTION", "FOOT_LIFT"
 """
 @dataclass
 class TrialError:
-    error_type: str        # name of error type
-    timestamp: float       # time.time() when error was first detected
-    duration: float = 0.0  # how long the error lasted (filled in when error ends)
+    error_type: str        # error type
+    timestamp: float       # the timestamp at which the error was detected
+    duration: float = 0.0  # (seconds) how long the error lasted
 
 @dataclass
 class CalibrationData:
-    left_wrist_hip_dist: float  = 0.0  # baseline normalized distance, left wrist to left hip
-    right_wrist_hip_dist: float = 0.0  # right wrist to right hip
-    threshold_multiplier: float = 1.5  # "HANDS_OFF_HIPS" fires at baseline * this
+    left_wrist_hip_dist: float  = 0.0
+    right_wrist_hip_dist: float = 0.0
+    left_foot_y: float          = 0.0
+    right_foot_y: float         = 0.0
+    valid: bool                 = False
 
-"""
-TrialResult class: describes the nature of the trial and the results of the trial. 
-contains attributes: stance, surface, duration in seconds, list of errors, start time, end time.
-"""
+""" Contains data per frame, for saving in a csv """
 @dataclass
-class TrialResult:
-    stance: str                         # double leg, single leg, or tandem
-    surface: str                        # firm or foam
-    duration_s: float       = 20.0      # each trial is 20 seconds long by default
-    errors: List[TrialError]= field(default_factory=list)       # the list of errors committed.
-    start_time: float       = 0.0       # will change
-    end_time: float         = 0.0       # will changw
+class FrameData:
+    frame_idx: int
+    timestamp_ms: float
+    in_trial: bool
+    in_calib: bool
+ 
+    face_detected: bool = False
+    pose_detected: bool = False
+ 
+    # eyes
+    avg_ar: float = 0.0
+ 
+    # stats from pose landmarker
+    left_wrist_hip_dist:  float = 0.0
+    right_wrist_hip_dist: float = 0.0
+    mid_shoulder_x:       float = 0.0
+    left_ankle_x:  float = 0.0
+    right_ankle_x: float = 0.0
+    left_foot_y:   float = 0.0
+    right_foot_y:  float = 0.0
+    left_hip_angle:  float = 180.0
+    right_hip_angle: float = 180.0
 
-    @property
-    def error_count(self):              # a method to return the number of errors for this trial result
-        return len(self.errors)
-    
 """ 
-DebounceState class: tracks whether an error is currently active, and only commits it once it's been sustained for 200ms.
+DebounceState class: tracks whether an error is currently active, 
+and only commits it once it's been sustained for DEBOUNCE_S.
 All error detecting helper functions will use this.
 """
 @dataclass
@@ -156,9 +179,9 @@ class DebounceState:
     first_seen: float   = 0.0               # time.time() when condition first appeared
     committed: bool     = False             # has it been logged as an error yet?
     error_ref: Optional[TrialError] = None  # reference to the logged error. None by default
+    
 
-""" global debounce duration """
-DEBOUNCE_MS = 0.2  # 200ms by default
+
 
 """ a method to update an instance of the debounce class """
 def update_debounce(state: DebounceState, condition: bool, error_type: str, trial: TrialResult) -> DebounceState:
@@ -195,18 +218,7 @@ def update_debounce(state: DebounceState, condition: bool, error_type: str, tria
                                         ############################# EYES OPEN #############################
                                         
                                         
-""" landmark indices for MediaPipe FaceLandmarker (478-point model) """
-# Left eye
-LEFT_EYE_TOP    = 159
-LEFT_EYE_BOTTOM = 145
-LEFT_EYE_INNER  = 133
-LEFT_EYE_OUTER  = 33
 
-# Right eye
-RIGHT_EYE_TOP    = 386
-RIGHT_EYE_BOTTOM = 374
-RIGHT_EYE_INNER  = 362
-RIGHT_EYE_OUTER  = 263
 
 """ global eye aspect ratio threshold """
 ASPECT_RATIO_THRESHOLD = 0.2  # calibrate with testing
@@ -241,10 +253,7 @@ def detect_eye_error(face_landmarks, img_w, img_h) -> bool:
                                     
                                     
 """ landmark indices for MediaPipe PoseLandmarker (33-point model) """
-LEFT_WRIST  = 15
-RIGHT_WRIST = 16
-LEFT_HIP    = 23
-RIGHT_HIP   = 24
+
 
 """ get the normalized distance between 2 landmarks """
 def get_normalized_distance(lm_a, lm_b) -> float:
@@ -276,10 +285,6 @@ def detect_hands_off_hips(pose_landmarks, calib: CalibrationData) -> bool:
 
 
 """ landmark indices for MediaPipe PoseLandmarker (33-point model) """
-LEFT_ANKLE  = 27
-RIGHT_ANKLE = 28
-LEFT_SHOULDER  = 11
-RIGHT_SHOULDER = 12
 
 """ global stumble and sway thresholds """
 STUMBLE_THRESHOLD = 0.03   # normalized units; tune with testing
@@ -333,8 +338,7 @@ def detect_sway(history: PoseHistory) -> bool:
 
 
 """ landmark indices for MediaPipe PoseLandmarker (33-point model) """
-LEFT_KNEE  = 25
-RIGHT_KNEE = 26
+
 
 """ global hip abduction threshold """
 HIP_ABDUCTION_THRESHOLD = 30.0  # degrees
@@ -379,8 +383,7 @@ def detect_hip_abduction(pose_landmarks) -> bool:
 
 
 """ landmark indices for MediaPipe PoseLandmarker (33-point model) """
-LEFT_FOOT_INDEX  = 31
-RIGHT_FOOT_INDEX = 32
+
 
 """ global hip abduction threshold """
 FOOT_LIFT_THRESHOLD = 0.02  # tune with testing
@@ -634,17 +637,6 @@ def stabilize_frame(frame, angle_rad: float):
 TRIAL_START_MS  = 1000.0   # let's say the trial starts 1 second after recording. THIS IS A TEST VALUE!!!
 TRIAL_END_MS    = TRIAL_START_MS + 20000.0
 
-@dataclass
-class FrameData:
-    timestamp_ms:   float
-    in_trial:       bool
-    avg_ar:         float = 0.0     # average eye aspect ratio
-    right : float = 0.0     #
-    hip_mid_x:      float = 0.0
-    left_ankle_y:   float = 0.0
-    right_ankle_y:  float = 0.0
-    face_detected:  bool  = False
-    pose_detected:  bool  = False
 
 
 """

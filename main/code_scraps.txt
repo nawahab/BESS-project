@@ -6,3 +6,54 @@ POSE_CONNECTIONS = [
     (11,23),(12,24),(23,24),(23,25),(24,26),(25,27),(26,28),
     (27,29),(28,30),(29,31),(30,32),(27,31),(28,32)
 ]
+
+def draw_landmarks_and_connections(image, results):
+    if not results.pose_landmarks:
+        return
+
+    h, w, _ = image.shape
+
+    for pose_landmarks in results.pose_landmarks:
+        # Draw connections
+        for start_idx, end_idx in POSE_CONNECTIONS:
+            start = pose_landmarks[start_idx]
+            end = pose_landmarks[end_idx]
+
+            if start.visibility > 0.5 and end.visibility > 0.5:
+                cv2.line(image,
+                    (int(start.x * w), int(start.y * h)),
+                    (int(end.x * w), int(end.y * h)),
+                    (255, 0, 255), 2)
+
+        # Draw landmark dots
+        for landmark in pose_landmarks:
+            try:
+                if landmark.visibility > 0.5:
+                    cv2.circle(image,
+                        (int(landmark.x * w), int(landmark.y * h)),
+                        4, (255, 255, 0), -1)
+            except:
+                pass
+    return
+
+"""
+TrialResult class: describes the nature of the trial and the results of the trial. 
+contains attributes: stance, surface, duration in seconds, list of errors, start time, end time.
+"""
+@dataclass
+class TrialResult:
+    stance: str                         # double leg, single leg, or tandem
+    surface: str                        # firm or foam
+    duration_s: float       = 20.0      # each trial is 20 seconds long by default
+    errors: List[TrialError]= field(default_factory=list)       # the list of errors committed.
+    start_time: float       = 0.0       # will change
+    end_time: float         = 0.0       # will changw
+
+    @property
+    def error_count(self):              # a method to return the number of errors for this trial result
+        return len(self.errors)
+    
+
+
+""" global debounce duration """
+DEBOUNCE_MS = 0.2  # 200ms by default
