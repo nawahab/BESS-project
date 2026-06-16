@@ -34,6 +34,9 @@ matplotlib.use("Agg")  # plots directly into files rather than popping up a GUI 
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
+# roll_correction.py from Mobile Motion Lab
+import roll_correction as rc
+
 # ==========================================
 # CONFIG
 # ==========================================
@@ -61,21 +64,26 @@ def ensure_model(model_path, url):
             urllib.request.urlretrieve(url, model_path)
     return model_path
 
-SCALE_FACTOR = 1.75  # inference scale-up for higher landmark precision
+# ==========================================
+# TIMING CONSTANTS
+# ==========================================
 
+COUNTDOWN_S      = 3.0                      # 3 second countdown before trial starts
+TRIAL_DURATION_S = 20.0                     # trial is 20 seconds long
+TRIAL_START_MS   = COUNTDOWN_S * 1000.0     # 
+TRIAL_END_MS     = TRIAL_START_MS + TRIAL_DURATION_S * 1000.0
+ 
+# Calibrate from the last CALIB_WINDOW_S seconds *before* trial start, when the
+# subject is most likely already in the reference pose (feet together, hands on
+# hips). Widen if your subjects settle later.
+CALIB_WINDOW_S = 1.0
+CALIB_START_MS = TRIAL_START_MS - CALIB_WINDOW_S * 1000.0  # e.g. 2.0 s
+CALIB_END_MS   = TRIAL_START_MS                            # e.g. 3.0 s
+ 
+# --- debounce -------------------------------------------------------------
+# An error must persist this long before it's committed (suppresses 1-frame flicker).
+DEBOUNCE_S = 0.20
 
-
-                                      ########################### HELPER FUNCTIONS ###########################
-
-
-""" These connection pairs are hardcoded since POSE_CONNECTIONS is gone from Mediapipe 0.10.35"""
-POSE_CONNECTIONS = [
-    (0,1),(1,2),(2,3),(3,7),(0,4),(4,5),(5,6),(6,8),
-    (9,10),(11,12),(11,13),(13,15),(15,17),(15,19),(15,21),
-    (17,19),(12,14),(14,16),(16,18),(16,20),(16,22),(18,20),
-    (11,23),(12,24),(23,24),(23,25),(24,26),(25,27),(26,28),
-    (27,29),(28,30),(29,31),(30,32),(27,31),(28,32)
-]
 
 def draw_landmarks_and_connections(image, results):
     if not results.pose_landmarks:
@@ -630,8 +638,8 @@ TRIAL_END_MS    = TRIAL_START_MS + 20000.0
 class FrameData:
     timestamp_ms:   float
     in_trial:       bool
-    avg_ar:         float = 0.0
-    shoulder_mid_x: float = 0.0
+    avg_ar:         float = 0.0     # average eye aspect ratio
+    right : float = 0.0     #
     hip_mid_x:      float = 0.0
     left_ankle_y:   float = 0.0
     right_ankle_y:  float = 0.0
@@ -640,8 +648,14 @@ class FrameData:
 
 
 """
-We're going to run MediaPipe on every frame, buffer FrameData.
-Returns (frames_bgr, frame_data_list, fps, img_w, img_h).
+CHANGE: should use imu_roll_correction.py instead.
+--------------------------------------------------
+After roll correction, process_video does the following:
+- imports face and pose landmarkers
+- only saves eye aspect ratio, hip shoulder and ankle positions
+- does not detect errors yet
+- does not draw landmarks
+
 """
 def process_video(video_path: str, imu_path: str) -> tuple:
     
@@ -734,7 +748,7 @@ def process_video(video_path: str, imu_path: str) -> tuple:
             
             # here i'm trying tracking some landmarks -- SUBJECT TO CHANGE!! 
             # figure out which landmarks to plot??? the most useful???
-            fd.shoulder_mid_x = (lm[LEFT_SHOULDER].x  + lm[RIGHT_SHOULDER].x)  / 2
+            fd.shoulder_mid_x = (lm[RIGHT_WRIST].x  + lm[RIGHT_SHOULDER].x)  / 2
             fd.hip_mid_x      = (lm[LEFT_HIP].x       + lm[RIGHT_HIP].x)       / 2
             fd.left_ankle_y   = lm[LEFT_ANKLE].y
             fd.right_ankle_y  = lm[RIGHT_ANKLE].y
@@ -841,6 +855,11 @@ def render_plots(frame_data_list, current_idx: int, plot_w=PLOT_W, plot_h=PLOT_H
 
 DISPLAY_H = 960   # height to resize video to for display
 
+""" 
+Here are all the things that run_video_analysis() does:
+- calls select_video_and_imu() <- this should be changed to integrate imu roll
+- calls process_video() 
+"""
 def run_video_analysis():
     video_path, imu_path = select_video_and_imu()
 
@@ -907,7 +926,7 @@ print("running")
 
 
 ################## LEGACY - WEBCAM VERSION ##################
-"""
+
 def run_trial():
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -1094,4 +1113,3 @@ def run_trial():
     cap.release()
     cv2.destroyAllWindows()
     return trial
-"""
