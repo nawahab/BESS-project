@@ -97,3 +97,22 @@ def update_debounce(state: DebounceState, condition: bool, error_type: str, tria
 
 """ global eye aspect ratio threshold """
 ASPECT_RATIO_THRESHOLD = 0.2  # calibrate with testing
+
+
+# ==========================================================================
+# IMU ROLL CORRECTION
+# ==========================================================================
+def correct_video(video_path: str, imu_path: str) -> str:
+    """
+    Drive roll_correction.main() for an arbitrary video/IMU pair and return the
+    path to the corrected MP4. roll_correction reads its inputs/outputs from
+    module-level globals and takes no arguments, so we set those globals, call
+    main(), and read the output path back. We don't edit roll_correction.py.
+    """
+    rc.IMU_PATH   = imu_path
+    rc.VIDEO_PATH = video_path
+    rc.main()
+    if not os.path.exists(rc.OUT_VIDEO):
+        raise RuntimeError(f"Roll correction did not produce: {rc.OUT_VIDEO}")
+    print(f"Corrected video: {rc.OUT_VIDEO}")
+    return rc.OUT_VIDEO

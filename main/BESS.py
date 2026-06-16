@@ -214,6 +214,118 @@ def angle_3pt(a, b, c) -> float:
     return angle
 
 
+# ==========================================================================
+# EXTRACT SIGNALS: run MediaPipe once, cache signals into FrameData array.
+# ==========================================================================
+
+"""
+Run face + pose landmarkers over every frame,
+caching the raw signals each detector will need. 
+Returns (frame_data_list, fps).
+"""
+def extract_signals(video_path: str):
+    cap0 = cv2.VideoCapture(video_path)
+    if not cap0.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+    
+    fps   = cap0.get(cv2.CAP_PROP_FPS) or 30.0
+    img_w = int(cap0.get(cv2.CAP_PROP_FRAME_WIDTH))
+    img_h = int(cap0.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    cap0.release()
+ 
+    # Mediapipe Landmarkers
+    face = vision.FaceLandmarker.create_from_options(
+        vision.FaceLandmarkerOptions(
+            base_options=python.BaseOptions(
+                model_asset_path=ensure_model(FACE_MODEL_PATH, FACE_MODEL_URL)),
+            running_mode=vision.RunningMode.VIDEO,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+    )
+    pose = vision.PoseLandmarker.create_from_options(
+        vision.PoseLandmarkerOptions(
+            base_options=python.BaseOptions(model_asset_path=ensure_model(POSE_MODEL_PATH, POSE_MODEL_URL)),
+            running_mode=vision.RunningMode.VIDEO,
+            num_poses=1,
+            min_pose_detection_confidence=0.5,
+            min_pose_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+    )
+ 
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+ 
+    # initialize empty FrameData array
+    frame_data_list: List[FrameData] = []
+    frame_idx = 0
+ 
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+ 
+        timestamp_ms = (frame_idx / fps) * 1000.0
+ 
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        ts_int = int(timestamp_ms)
+ 
+        face_res = face.detect_for_video(mp_img, ts_int)
+        pose_res = pose.detect_for_video(mp_img, ts_int)
+ 
+        in_trial = TRIAL_START_MS <= timestamp_ms <= TRIAL_END_MS
+        in_calib = CALIB_START_MS <= timestamp_ms < CALIB_END_MS
+        
+        # initialize a new FrameData object
+        fd = FrameData(frame_idx=frame_idx, timestamp_ms=timestamp_ms,
+                       in_trial=in_trial, in_calib=in_calib)
+ 
+        # fill in eye-related FrameData fields
+        if face_res.face_landmarks:
+            fd.face_detected = True
+            lm = face_res.face_landmarks[0]
+            l = aspect_ratio(lm, LEFT_EYE_TOP, LEFT_EYE_BOTTOM, LEFT_EYE_INNER, LEFT_EYE_OUTER, img_w, img_h)
+            r = aspect_ratio(lm, RIGHT_EYE_TOP, RIGHT_EYE_BOTTOM, RIGHT_EYE_INNER, RIGHT_EYE_OUTER, img_w, img_h)
+            fd.avg_ar = (l + r) / 2
+ 
+        # fill in pose-related FrameData fields
+        if pose_res.pose_landmarks:
+            fd.pose_detected = True
+            lm = pose_res.pose_landmarks[0]
+            fd.left_wrist_hip_dist  = normalized_distance(lm[LEFT_WRIST],  lm[LEFT_HIP])
+            fd.right_wrist_hip_dist = normalized_distance(lm[RIGHT_WRIST], lm[RIGHT_HIP])
+            fd.mid_shoulder_x = (lm[LEFT_SHOULDER].x + lm[RIGHT_SHOULDER].x) / 2
+            fd.left_ankle_x,  fd.right_ankle_x = lm[LEFT_ANKLE].x,  lm[RIGHT_ANKLE].x
+            fd.left_foot_y,   fd.right_foot_y  = lm[LEFT_FOOT_INDEX].y, lm[RIGHT_FOOT_INDEX].y
+            fd.left_hip_angle = angle_3pt(
+                (lm[LEFT_SHOULDER].x, lm[LEFT_SHOULDER].y),
+                (lm[LEFT_HIP].x,      lm[LEFT_HIP].y),
+                (lm[LEFT_KNEE].x,     lm[LEFT_KNEE].y))
+            fd.right_hip_angle = angle_3pt(
+                (lm[RIGHT_SHOULDER].x, lm[RIGHT_SHOULDER].y),
+                (lm[RIGHT_HIP].x,      lm[RIGHT_HIP].y),
+                (lm[RIGHT_KNEE].x,     lm[RIGHT_KNEE].y))
+ 
+        # append to FrameData array
+        frame_data_list.append(fd)
+        frame_idx += 1
+        
+        # update progress
+        if frame_idx % 60 == 0:
+            print(f"  extracted {frame_idx} frames")
+ 
+    cap.release()
+    face.close()
+    pose.close()
+    print(f"Extraction done: {len(frame_data_list)} frames.")
+    return frame_data_list, fps
+
 
 
 
