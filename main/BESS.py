@@ -9,30 +9,24 @@ Created on Thu May 21 14:10:00 2026
 # python version: 3.10.11
 
 import os # standard library, no pip install needed
-import math 
+import math # standard library, no pip install needed
 import urllib.request # standard library, no pip install needed
 from dataclasses import dataclass, field # standard library, no pip install needed
+from typing import List, Optional # standard library, no pip install needed
 
 import cv2 # pip install opencv-python, version = 4.13.0.92
 import numpy as np # pip install numpy, version = 1.26.4
 import pandas as pd # pip install pandas, version = 2.3.3
-from scipy.signal import savgol_filter # pip install scipy, version = 1.15.3
 
 import mediapipe as mp # pip install mediapipe, version = 0.10.35
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 import tkinter as tk # standard library, no pip install needed
-from tkinter import filedialog
+from tkinter import filedialog 
 
-from typing import List, Optional
-import time
-from enum import Enum
 
-import matplotlib
-matplotlib.use("Agg")  # plots directly into files rather than popping up a GUI window
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
+
 
 # roll_correction.py from Mobile Motion Lab
 import roll_correction as rc
