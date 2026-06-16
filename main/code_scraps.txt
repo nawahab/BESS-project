@@ -57,3 +57,43 @@ class TrialResult:
 
 """ global debounce duration """
 DEBOUNCE_MS = 0.2  # 200ms by default
+
+""" a method to update an instance of the debounce class """
+def update_debounce(state: DebounceState, condition: bool, error_type: str, trial: TrialResult) -> DebounceState:
+    now = time.time()
+
+    if condition:
+        # condition just appeared
+        if not state.active:
+            state.active     = True
+            state.first_seen = now
+            state.committed  = False
+            state.error_ref  = None
+            
+        # sustained long enough-> log it.
+        elif not state.committed and (now - state.first_seen) >= DEBOUNCE_MS:
+            err = TrialError(error_type=error_type, timestamp=state.first_seen)
+            trial.errors.append(err)
+            state.committed = True
+            state.error_ref = err
+        
+    else:
+        # condition ended-> fill in duration.
+        if state.committed and state.error_ref is not None:
+            state.error_ref.duration = now - state.error_ref.timestamp
+        
+        # reset
+        state.active    = False
+        state.committed = False
+        state.error_ref = None
+
+    return state
+
+
+                                        ############################# EYES OPEN #############################
+                                        
+                                        
+
+
+""" global eye aspect ratio threshold """
+ASPECT_RATIO_THRESHOLD = 0.2  # calibrate with testing

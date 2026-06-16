@@ -179,52 +179,18 @@ class DebounceState:
     first_seen: float   = 0.0               # time.time() when condition first appeared
     committed: bool     = False             # has it been logged as an error yet?
     error_ref: Optional[TrialError] = None  # reference to the logged error. None by default
-    
 
 
+# ==========================================
+# GEOMETRY HELPER FUNCTIONS
+# ==========================================
 
-""" a method to update an instance of the debounce class """
-def update_debounce(state: DebounceState, condition: bool, error_type: str, trial: TrialResult) -> DebounceState:
-    now = time.time()
+""" Normalized distance between 2 landmarks. """
+def normalized_distance(lm_a, lm_b) -> float:
+    return math.sqrt((lm_a.x - lm_b.x)**2 + (lm_a.y - lm_b.y)**2)
 
-    if condition:
-        # condition just appeared
-        if not state.active:
-            state.active     = True
-            state.first_seen = now
-            state.committed  = False
-            state.error_ref  = None
-            
-        # sustained long enough-> log it.
-        elif not state.committed and (now - state.first_seen) >= DEBOUNCE_MS:
-            err = TrialError(error_type=error_type, timestamp=state.first_seen)
-            trial.errors.append(err)
-            state.committed = True
-            state.error_ref = err
-        
-    else:
-        # condition ended-> fill in duration.
-        if state.committed and state.error_ref is not None:
-            state.error_ref.duration = now - state.error_ref.timestamp
-        
-        # reset
-        state.active    = False
-        state.committed = False
-        state.error_ref = None
-
-    return state
-
-
-                                        ############################# EYES OPEN #############################
-                                        
-                                        
-
-
-""" global eye aspect ratio threshold """
-ASPECT_RATIO_THRESHOLD = 0.2  # calibrate with testing
-
-""" Calculates the Eye Aspect Ratio """
-def calculate_aspect_ratio(landmarks, top_idx, bottom_idx, inner_idx, outer_idx, img_w, img_h):
+""" Calculate aspect ratio given list of landmarks, 4 indexes, image width and height."""
+def aspect_ratio(landmarks, top_idx, bottom_idx, inner_idx, outer_idx, img_w, img_h):
     top    = landmarks[top_idx]
     bottom = landmarks[bottom_idx]
     inner  = landmarks[inner_idx]
@@ -236,6 +202,27 @@ def calculate_aspect_ratio(landmarks, top_idx, bottom_idx, inner_idx, outer_idx,
     if horizontal == 0:
         return 0.0
     return vertical / horizontal
+
+""" calculates the angle formed by 3 co-ordinates
+    a,b,c: tuples """
+def angle_3pt(a, b, c) -> float:
+    a, b, c = np.array(a), np.array(b), np.array(c)
+    radians = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
+    angle = np.abs(radians * 180.0 / np.pi)
+    if angle > 180.0:
+        angle = 360 - angle
+    return angle
+
+
+
+
+
+
+
+
+
+
+
 
 """ Detection for eye opening error """
 def detect_eye_error(face_landmarks, img_w, img_h) -> bool:
@@ -255,9 +242,7 @@ def detect_eye_error(face_landmarks, img_w, img_h) -> bool:
 """ landmark indices for MediaPipe PoseLandmarker (33-point model) """
 
 
-""" get the normalized distance between 2 landmarks """
-def get_normalized_distance(lm_a, lm_b) -> float:
-    return math.sqrt((lm_a.x - lm_b.x)**2 + (lm_a.y - lm_b.y)**2)
+
 
 """ calibrate each person's hands on hips distance, and store in a CalibrationData class. """
 def calibrate_hands_on_hips(pose_landmarks) -> CalibrationData:
@@ -343,15 +328,7 @@ def detect_sway(history: PoseHistory) -> bool:
 """ global hip abduction threshold """
 HIP_ABDUCTION_THRESHOLD = 30.0  # degrees
 
-""" calculates the angle formed by 3 co-ordinates
-    a,b,c: tuples """
-def calculate_angle(a, b, c) -> float:
-    a, b, c = np.array(a), np.array(b), np.array(c)
-    radians = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
-    angle = np.abs(radians * 180.0 / np.pi)
-    if angle > 180.0:
-        angle = 360 - angle
-    return angle
+
 
 """ Detection for hip abduction error """
 def detect_hip_abduction(pose_landmarks) -> bool:
