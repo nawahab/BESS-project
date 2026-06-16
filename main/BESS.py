@@ -586,3 +586,63 @@ def export_errors_csv(errors: List[TrialError], stance: str, surface: str, path:
     pd.DataFrame(rows).to_csv(path, index=False)
     print(f"Errors saved to {path}. ({len(errors)} errors).")
     
+
+# =============================================
+# FILE SELECTION + ANALYSIS WRAPPER
+# =============================================
+
+"""
+Prompt user to select video and IMU data from file browser.
+Returns the paths.
+"""
+def select_video_and_imu():
+    root = tk.Tk()
+    root.withdraw()
+    video_path = filedialog.askopenfilename(
+        title="Select BESS Video",
+        filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv")])
+    if not video_path:
+        raise RuntimeError("No video selected.")
+    imu_path = filedialog.askopenfilename(
+        title="Select IMU Data File",
+        filetypes=[("Text/JSON", "*.txt *.json"), ("All files", "*.*")])
+    if not imu_path:
+        raise RuntimeError("No IMU file selected (required for roll correction).")
+    return video_path, imu_path
+ 
+"""
+Wrapper function to call all processing and detection functions.
+Returns the TrialError array.
+"""
+def analyze(video_path: str, imu_path: str,
+            stance: str = "DOUBLE_LEG", surface: str = "FIRM"):
+    print("Step 0: IMU roll-correcting video...")
+    corrected_path = correct_video(video_path, imu_path)
+ 
+    print("Step 1: extracting signals (this runs MediaPipe once)...")
+    frame_data_list, fps = extract_signals(corrected_path)
+ 
+    calib = calibrate(frame_data_list)
+ 
+    print("Step 2: detecting errors...")
+    errors, per_frame_flags = run_detection(frame_data_list, calib)
+ 
+    # Write CSVs next to the ORIGINAL video, not the corrected one.
+    base = os.path.splitext(video_path)[0]
+    export_signals_csv(per_frame_flags, base + "_signals.csv")
+    export_errors_csv(errors, stance, surface, base + "_errors.csv")
+ 
+    counts = {}
+    for e in errors:
+        counts[e.error_type] = counts.get(e.error_type, 0) + 1
+    print("Summary:", counts if counts else "no errors")
+    return errors
+ 
+"""
+Main wrapper function.
+Calls video selection and analysis functions.
+"""
+if __name__ == "__main__":
+    # video path, IMU path
+    vp, ip = select_video_and_imu()
+    analyze(vp, ip)
