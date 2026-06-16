@@ -86,6 +86,18 @@ DEBOUNCE_MS = 200 # 200 ms
 
 
 # ==========================================
+# DETECTION THRESHOLDS
+# ==========================================
+
+ASPECT_RATIO_THRESHOLD  = 0.20      # eye AR below this means EYES OPEN
+HANDS_THRESHOLD_MULT     = 1.5      # wrist-hip dist > (baseline * this) means HANDS OFF HIPS
+STUMBLE_THRESHOLD        = 0.03     # per-frame ankle x jump (normalized)
+SWAY_THRESHOLD           = 0.015    # per-frame mid-shoulder x jump (normalized)
+HIP_ABDUCTION_THRESHOLD  = 30.0     # degrees from neutral (180) shoulder-hip-knee
+FOOT_LIFT_THRESHOLD      = 0.02     # normalized rise of foot above baseline y
+
+
+# ==========================================
 # MEDIAPIPE CONSTANTS
 # ==========================================
 
@@ -354,6 +366,7 @@ def extract_signals(video_path: str):
 # ==========================================================================
 # CALIBRATION
 # ==========================================================================
+
 """
 using the subarray of FrameData where in_calib == True,
 calculate and return a CalibrationData object.
@@ -379,3 +392,45 @@ def calibrate(frame_data_list: List[FrameData]) -> CalibrationData:
           f"foot-y L={c.left_foot_y:.3f} R={c.right_foot_y:.3f}")
     
     return c
+
+
+# ==========================================================================
+# DETECT: per-frame detection over cached signal array
+# ==========================================================================
+
+""" 
+Return {error_type: bool} for this frame. This happens before debouncing.
+"""
+def detect_per_frame(fd: FrameData, prev: Optional[FrameData], calib: CalibrationData) -> dict:
+    # {error_type : bool} dictionary
+    flags = {"EYES_OPEN": False, "HANDS_OFF_HIPS": False,
+             "STUMBLE_SWAY": False, "HIP_ABDUCTION": False, "FOOT_LIFT": False}
+ 
+    
+    if fd.face_detected:
+        flags["EYES_OPEN"] = fd.avg_ar < ASPECT_RATIO_THRESHOLD
+ 
+    if fd.pose_detected:
+        if calib.valid:
+            flags["HANDS_OFF_HIPS"] = (
+                fd.left_wrist_hip_dist  > calib.left_wrist_hip_dist  * HANDS_THRESHOLD_MULT or
+                fd.right_wrist_hip_dist > calib.right_wrist_hip_dist * HANDS_THRESHOLD_MULT
+                )
+            
+            flags["FOOT_LIFT"] = (
+                (calib.left_foot_y  - fd.left_foot_y)  > FOOT_LIFT_THRESHOLD or
+                (calib.right_foot_y - fd.right_foot_y) > FOOT_LIFT_THRESHOLD
+                )
+ 
+        flags["HIP_ABDUCTION"] = (
+            abs(180.0 - fd.left_hip_angle)  > HIP_ABDUCTION_THRESHOLD or
+            abs(180.0 - fd.right_hip_angle) > HIP_ABDUCTION_THRESHOLD
+            )
+ 
+        if prev is not None and prev.pose_detected:
+            stumble = (abs(fd.left_ankle_x  - prev.left_ankle_x)  > STUMBLE_THRESHOLD or
+                       abs(fd.right_ankle_x - prev.right_ankle_x) > STUMBLE_THRESHOLD)
+            sway = abs(fd.mid_shoulder_x - prev.mid_shoulder_x) > SWAY_THRESHOLD
+            flags["STUMBLE_SWAY"] = stumble or sway
+ 
+    return flags
