@@ -213,6 +213,24 @@ def angle_3pt(a, b, c) -> float:
         angle = 360 - angle
     return angle
 
+"""
+Use roll_correction.py to correct a video with its IMU data.
+Returns the output path.
+"""
+# ==========================================================================
+# IMU ROLL CORRECTION
+# ==========================================================================
+def correct_video(video_path: str, imu_path: str) -> str:
+    rc.IMU_PATH   = imu_path
+    rc.VIDEO_PATH = video_path
+    rc.main()
+    
+    if not os.path.exists(rc.OUT_VIDEO):
+        raise RuntimeError(f"Roll correction did not produce: {rc.OUT_VIDEO}")
+    
+    print(f"Corrected video: {rc.OUT_VIDEO}")
+    return rc.OUT_VIDEO
+
 
 # ==========================================================================
 # EXTRACT SIGNALS: run MediaPipe once, cache signals into FrameData array.
