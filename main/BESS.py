@@ -434,3 +434,83 @@ def detect_per_frame(fd: FrameData, prev: Optional[FrameData], calib: Calibratio
             flags["STUMBLE_SWAY"] = stumble or sway
  
     return flags
+
+"""
+Iterate over the cached trial frames, apply per-frame detection + debounce.
+Returns (errors, per_frame_flags) where per_frame_flags aligns with the
+trial frames for the signal CSV.
+"""
+def run_detection(frame_data_list: List[FrameData], calib: CalibrationData):
+   
+    # empty TrialError array
+    errors: List[TrialError] = []
+    
+    # create a dictionatry where:
+    # keys: error types
+    # values: default DeboounceState objects.
+    states = {k: DebounceState() for k in
+              ["EYES_OPEN", "HANDS_OFF_HIPS", "STUMBLE_SWAY", "HIP_ABDUCTION", "FOOT_LIFT"]}
+ 
+    # initialize empty per_frame_flag array
+    per_frame_flags = []
+    prev = None
+ 
+    # only the frames where in_trial == True
+    trial_frames = [fd for fd in frame_data_list if fd.in_trial]
+    
+    for fd in trial_frames:
+        # relative time
+        t_rel = (fd.timestamp_ms - TRIAL_START_MS) / 1000.0  # seconds into trial
+        
+        # detect the errors in that framewithout debounce
+        raw = detect_per_frame(fd, prev, calib)
+ 
+        # empty dictionry for errors committed now
+        committed_now = {}
+        
+        # iterate over (error type : bool) pairs in the raw detected errors in that frame
+        for etype, cond in raw.items():
+            # access the value (DebounceState) of that error type 
+            # in the states dictionary initialized above
+            st = states[etype]
+            
+            # bool was True
+            if cond:
+                # if the error is not active, become active
+                if not st.active:
+                    st.active = True
+                    st.first_seen = t_rel 
+                    st.committed = False
+                    st.error_ref = None
+                    
+                elif not st.committed and (t_rel - st.first_seen) >= DEBOUNCE_S:
+                    # add TrialError to errors array
+                    err = TrialError(error_type=etype, timestamp=st.first_seen)
+                    errors.append(err)
+                    
+                    # if the error is not committed, become committed
+                    st.committed = True
+                    # add reference to TrialError to the DebounceState field.
+                    st.error_ref = err
+            # bool was False
+            else:
+                # if this marks the end of a pervious error
+                if st.committed and st.error_ref is not None:
+                    st.error_ref.duration = t_rel - st.error_ref.timestamp
+                # reset fields to no error currently
+                st.active, st.committed, st.error_ref = False, False, None
+            
+            # add key value pair to committed_now dictionary
+            committed_now[etype] = st.committed
+
+        # ensuring that committed_now is of type dictionary
+        per_frame_flags.append((fd, raw, dict(committed_now)))
+        prev = fd
+ 
+    # close out any errors still active at trial end
+    last_t = (trial_frames[-1].timestamp_ms - TRIAL_START_MS) / 1000.0 if trial_frames else 0.0
+    for st in states.values():
+        if st.committed and st.error_ref is not None and st.error_ref.duration == 0.0:
+            st.error_ref.duration = last_t - st.error_ref.timestamp
+
+    return errors, per_frame_flags
