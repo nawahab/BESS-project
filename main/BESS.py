@@ -451,7 +451,9 @@ def run_detection(frame_data_list: List[FrameData], calib: CalibrationData):
     states = {k: DebounceState() for k in
               ["EYES_OPEN", "HANDS_OFF_HIPS", "STUMBLE_SWAY", "HIP_ABDUCTION", "FOOT_LIFT"]}
  
-    # initialize empty per_frame_flag array
+    # initialize empty per_frame_flag array.
+    # each item will be a 3-tuple of (FrameData, dictionary of {error type : bool}, dictionary of {error type : bool})
+    # WHAT TYPE IS PER_FRAME FLAGS????? ARRAY OF 3-TUPLES!!!!!
     per_frame_flags = []
     prev = None
  
@@ -504,6 +506,7 @@ def run_detection(frame_data_list: List[FrameData], calib: CalibrationData):
             committed_now[etype] = st.committed
 
         # ensuring that committed_now is of type dictionary
+        # WHAT TYPE IS PER_FRAME FLAGS????? ARRAY OF 3-TUPLES!!!!!
         per_frame_flags.append((fd, raw, dict(committed_now)))
         prev = fd
  
@@ -514,3 +517,72 @@ def run_detection(frame_data_list: List[FrameData], calib: CalibrationData):
             st.error_ref.duration = last_t - st.error_ref.timestamp
 
     return errors, per_frame_flags
+
+
+# ==========================================================================
+# CSV EXPORT
+# ==========================================================================
+
+"""
+Export the signals collected in the (fd, raw, committed) 3-tuple of per_frame_flags
+to a .csv file.
+"""
+def export_signals_csv(per_frame_flags, path: str):
+    rows = []
+    # remember that raw and committed are both {error_type (str) : (bool)} dictionary types
+    for fd, raw, committed in per_frame_flags:
+        t_rel = (fd.timestamp_ms - TRIAL_START_MS) / 1000.0
+        
+        # each row contains these columns:
+        rows.append({
+            "t_trial_s": round(t_rel, 3),
+            "face_detected": fd.face_detected,
+            "pose_detected": fd.pose_detected,
+            "avg_ar": round(fd.avg_ar, 4),
+            "l_wrist_hip": round(fd.left_wrist_hip_dist, 4),
+            "r_wrist_hip": round(fd.right_wrist_hip_dist, 4),
+            "mid_shoulder_x": round(fd.mid_shoulder_x, 4),
+            "l_ankle_x": round(fd.left_ankle_x, 4),
+            "r_ankle_x": round(fd.right_ankle_x, 4),
+            "l_foot_y": round(fd.left_foot_y, 4),
+            "r_foot_y": round(fd.right_foot_y, 4),
+            "l_hip_angle": round(fd.left_hip_angle, 2),
+            "r_hip_angle": round(fd.right_hip_angle, 2),
+            "raw_EYES_OPEN": raw["EYES_OPEN"],
+            "raw_HANDS_OFF_HIPS": raw["HANDS_OFF_HIPS"],
+            "raw_STUMBLE_SWAY": raw["STUMBLE_SWAY"],
+            "raw_HIP_ABDUCTION": raw["HIP_ABDUCTION"],
+            "raw_FOOT_LIFT": raw["FOOT_LIFT"],
+        })
+        
+    # pd.DataFrame != FrameData
+    # export all the rows in a .csv file.
+    pd.DataFrame(rows).to_csv(path, index=False)
+    
+    print(f"Signals saved to {path}. ({len(rows)} rows).")
+
+"""
+Export the errors from a TrialError array to a .csv file.
+""" 
+def export_errors_csv(errors: List[TrialError], stance: str, surface: str, path: str):
+    # each row will contain these columns:
+    if errors:
+        rows = [{"stance": stance, 
+                 "surface": surface, 
+                 "error_type": e.error_type,
+                 "start_s": round(e.timestamp, 3), 
+                 "duration_s": round(e.duration, 3) 
+                } for e in errors]
+    # no errors committed; errors array empty
+    else:
+        rows = [{"stance": stance, 
+                 "surface": surface, 
+                 "error_type": "NONE",
+                 "start_s": 0, 
+                 "duration_s": 0
+                }]
+    
+    # export all the rows in a .csv file.
+    pd.DataFrame(rows).to_csv(path, index=False)
+    print(f"Errors saved to {path}. ({len(errors)} errors).")
+    
