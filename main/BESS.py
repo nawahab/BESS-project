@@ -95,6 +95,7 @@ FOOT_LIFT_THRESHOLD      = 0.02     # normalized rise of foot above baseline y
 # MEDIAPIPE CONSTANTS
 # ==========================================
 
+# Face Landmarker:
 LEFT_EYE_TOP    = 159
 LEFT_EYE_BOTTOM = 145
 LEFT_EYE_INNER  = 133
@@ -104,6 +105,12 @@ RIGHT_EYE_TOP    = 386
 RIGHT_EYE_BOTTOM = 374
 RIGHT_EYE_INNER  = 362
 RIGHT_EYE_OUTER  = 263
+
+# Pose Landmarker:
+NOSE = 0
+LEFT_EYE, RIGHT_EYE = 2, 5      # center from pose landmarker (!= face-mesh eyes)
+LEFT_EAR, RIGHT_EAR = 7, 8
+HEAD_POINTS = [NOSE, LEFT_EYE, RIGHT_EYE, LEFT_EAR, RIGHT_EAR]
 
 LEFT_SHOULDER  = 11
 RIGHT_SHOULDER = 12
@@ -128,11 +135,30 @@ RIGHT_FOOT_INDEX = 32
 
 
 # ==========================================
+# FACE-CROP CONFIG
+# ==========================================
+
+# How much to pad the head bounding box (fraction of box size on each side).
+# Generous padding ensures the chin/brow aren't clipped when the head tilts.
+HEAD_PAD = 0.6
+# Side length the head crop is upscaled to before face landmarking.
+FACE_CROP_SIZE = 256
+# Minimum raw head-box size (pixels). Below this the crop is junk; skip face detect.
+MIN_HEAD_PX = 24
+ 
+# Debug: save the first N trial head-crops to DEBUG_CROP_DIR to visually verify
+# whether there's a landmarkable face in them. 
+# can set to 0 to disable.
+DEBUG_SAVE_CROPS = 15
+DEBUG_CROP_DIR   = "debug_head_crops"
+
+
+# ==========================================
 # DATA MODELS
 # ==========================================
 
 """ There will be 5 possible errors, each corresponding to a state in the state machine:
-"EYES_OPEN", "HANDS_OFF_HIPS", "STUMBLE", "HIP_ABDUCTION", "FOOT_LIFT"
+"EYES_OPEN", "HANDS_OFF_HIPS", "STUMBLE_SWAY", "HIP_ABDUCTION", "FOOT_LIFT"
 """
 @dataclass
 class TrialError:
@@ -225,6 +251,72 @@ def angle_3pt(a, b, c) -> float:
     return angle
 
 
+# ==========================================
+# HEAD CROP
+# ==========================================
+
+"""
+Stage 1 of the two-stage face pipeline, to fix "face too small" issue.
+
+Compute a padded square-ish bounding box around the head from Pose head
+landmarks, crop it from the full-res frame, and upscale to FACE_CROP_SIZE.
+
+Returns (crop_bgr, ok). ok is False if the head box is too small/missing,
+in which case crop_bgr is None.
+"""
+def crop_head(frame, pose_landmarks):
+
+    h, w = frame.shape[:2]
+    pts = []
+    for idx in HEAD_POINTS:
+        lm = pose_landmarks[idx]
+        # only trust reasonably visible head points
+        # is getattr the best way to do this?
+        if getattr(lm, "visibility", 1.0) >= 0.3:
+            pts.append((lm.x * w, lm.y * h))
+    if len(pts) < 2:
+        return None, False
+ 
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+ 
+    # box width and height
+    bw = x_max - x_min
+    bh = y_max - y_min
+    
+    # if head is taller than the eye/ear span suggests, bias the box to a square
+    # using the larger dimension, then pad.
+    side = max(bw, bh)
+    if side < MIN_HEAD_PX:
+        # ear-to-ear span can be tiny if only nose+one eye seen; fall back to a
+        # head-height estimate from nose-to-ear if possible, else bail.
+        side = max(side, MIN_HEAD_PX)
+ 
+    cx = (x_min + x_max) / 2.0
+    cy = (y_min + y_max) / 2.0
+    half = side * (1.0 + HEAD_PAD) / 2.0
+    # shift the box slightly up: pose head points cluster around eyes/nose, but
+    # we want forehead-to-chin, so extend a touch downward by biasing center.
+    cy += side * 0.15
+ 
+    x0 = int(max(0, cx - half))
+    x1 = int(min(w, cx + half))
+    y0 = int(max(0, cy - half))
+    y1 = int(min(h, cy + half))
+    if x1 - x0 < MIN_HEAD_PX or y1 - y0 < MIN_HEAD_PX:
+        return None, False
+ 
+    crop = frame[y0:y1, x0:x1]
+    if crop.size == 0:
+        return None, False
+ 
+    crop = cv2.resize(crop, (FACE_CROP_SIZE, FACE_CROP_SIZE),
+                      interpolation=cv2.INTER_CUBIC)
+    return crop, True
+
+
 # ==========================================================================
 # IMU ROLL CORRECTION
 # ==========================================================================
@@ -249,8 +341,8 @@ def correct_video(video_path: str, imu_path: str) -> str:
 # ==========================================================================
 
 """
-Run face + pose landmarkers over every frame,
-caching the raw signals each detector will need. 
+Run face + pose landmarkers over every frame (head cropped frame 
+for eye detection), caching the raw signals each detector will need. 
 Returns (frame_data_list, fps).
 """
 def extract_signals(video_path: str):
@@ -271,9 +363,9 @@ def extract_signals(video_path: str):
                 model_asset_path=ensure_model(FACE_MODEL_PATH, FACE_MODEL_URL)),
             running_mode=vision.RunningMode.VIDEO,
             num_faces=1,
-            min_face_detection_confidence=0.5,
-            min_face_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
+            min_face_detection_confidence=0.3,   # lowered: small upscaled faces
+            min_face_presence_confidence=0.3,
+            min_tracking_confidence=0.3,
         )
     )
     pose = vision.PoseLandmarker.create_from_options(
@@ -291,7 +383,11 @@ def extract_signals(video_path: str):
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
  
-    # initialize empty FrameData array
+    if DEBUG_SAVE_CROPS > 0:
+        os.makedirs(DEBUG_CROP_DIR, exist_ok=True)
+    crops_saved = 0
+    face_hits = 0
+ 
     frame_data_list: List[FrameData] = []
     frame_idx = 0
  
@@ -301,13 +397,13 @@ def extract_signals(video_path: str):
             break
  
         timestamp_ms = (frame_idx / fps) * 1000.0
- 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         ts_int = int(timestamp_ms)
  
-        face_res = face.detect_for_video(mp_img, ts_int)
-        pose_res = pose.detect_for_video(mp_img, ts_int)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_full = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+ 
+        # pose on the full frame
+        pose_res = pose.detect_for_video(mp_full, ts_int)
  
         in_trial = TRIAL_START_MS <= timestamp_ms <= TRIAL_END_MS
         in_calib = CALIB_START_MS <= timestamp_ms < CALIB_END_MS
@@ -316,15 +412,7 @@ def extract_signals(video_path: str):
         fd = FrameData(frame_idx=frame_idx, timestamp_ms=timestamp_ms,
                        in_trial=in_trial, in_calib=in_calib)
  
-        # fill in eye-related FrameData fields
-        if face_res.face_landmarks:
-            fd.face_detected = True
-            lm = face_res.face_landmarks[0]
-            l = aspect_ratio(lm, LEFT_EYE_TOP, LEFT_EYE_BOTTOM, LEFT_EYE_INNER, LEFT_EYE_OUTER, img_w, img_h)
-            r = aspect_ratio(lm, RIGHT_EYE_TOP, RIGHT_EYE_BOTTOM, RIGHT_EYE_INNER, RIGHT_EYE_OUTER, img_w, img_h)
-            fd.avg_ar = (l + r) / 2
- 
-        # fill in pose-related FrameData fields
+        # pose-derived signals
         if pose_res.pose_landmarks:
             fd.pose_detected = True
             lm = pose_res.pose_landmarks[0]
@@ -342,7 +430,33 @@ def extract_signals(video_path: str):
                 (lm[RIGHT_HIP].x,      lm[RIGHT_HIP].y),
                 (lm[RIGHT_KNEE].x,     lm[RIGHT_KNEE].y))
  
-        # append to FrameData array
+            # Stage 2: face detection on the head crop
+            crop_bgr, crop_ok = crop_head(frame, lm)
+            if crop_ok:
+                crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+                mp_crop = mp.Image(image_format=mp.ImageFormat.SRGB, data=crop_rgb)
+                face_res = face.detect_for_video(mp_crop, ts_int)
+ 
+                if face_res.face_landmarks:
+                    fd.face_detected = True
+                    face_hits += 1
+                    flm = face_res.face_landmarks[0]
+                    # crop is square FACE_CROP_SIZE; AR is scale-invariant
+                    l = aspect_ratio(flm, LEFT_EYE_TOP, LEFT_EYE_BOTTOM,
+                                     LEFT_EYE_INNER, LEFT_EYE_OUTER,
+                                     FACE_CROP_SIZE, FACE_CROP_SIZE)
+                    r = aspect_ratio(flm, RIGHT_EYE_TOP, RIGHT_EYE_BOTTOM,
+                                     RIGHT_EYE_INNER, RIGHT_EYE_OUTER,
+                                     FACE_CROP_SIZE, FACE_CROP_SIZE)
+                    fd.avg_ar = (l + r) / 2
+ 
+                # save a few crops in the trial window for visual inspection
+                if (DEBUG_SAVE_CROPS > 0 and in_trial and crops_saved < DEBUG_SAVE_CROPS):
+                    tag = "FACE" if fd.face_detected else "NOFACE"
+                    cv2.imwrite(os.path.join(
+                        DEBUG_CROP_DIR, f"crop_{frame_idx:04d}_{tag}.png"), crop_bgr)
+                    crops_saved += 1
+ 
         frame_data_list.append(fd)
         frame_idx += 1
         
@@ -353,7 +467,15 @@ def extract_signals(video_path: str):
     cap.release()
     face.close()
     pose.close()
+ 
+    trial_frames = sum(1 for f in frame_data_list if f.in_trial)
+    trial_faces  = sum(1 for f in frame_data_list if f.in_trial and f.face_detected)
     print(f"Extraction done: {len(frame_data_list)} frames.")
+    print(f"Face hit rate (trial): {trial_faces}/{trial_frames} "
+          f"({(100*trial_faces/max(trial_frames,1)):.0f}%)")
+    if DEBUG_SAVE_CROPS > 0:
+        print(f"Saved {crops_saved} debug crops to ./{DEBUG_CROP_DIR}/ "
+              f"-- open these to verify the face is landmarkable.")
     return frame_data_list, fps
 
 
