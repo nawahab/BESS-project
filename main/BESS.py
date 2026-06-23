@@ -83,7 +83,7 @@ DEBOUNCE_MS = 200 # 200 ms
 # DETECTION THRESHOLDS
 # ==========================================
 
-ASPECT_RATIO_THRESHOLD  = 0.20      # eye AR below this means EYES OPEN
+ASPECT_RATIO_THRESHOLD  = 0.20      # eye AR above this means EYES OPEN
 HANDS_THRESHOLD_MULT     = 1.5      # wrist-hip dist > (baseline * this) means HANDS OFF HIPS
 STUMBLE_THRESHOLD        = 0.03     # per-frame ankle x jump (normalized)
 SWAY_THRESHOLD           = 0.015    # per-frame mid-shoulder x jump (normalized)
@@ -524,7 +524,7 @@ def detect_per_frame(fd: FrameData, prev: Optional[FrameData], calib: Calibratio
  
     
     if fd.face_detected:
-        flags["EYES_OPEN"] = fd.avg_ar < ASPECT_RATIO_THRESHOLD
+        flags["EYES_OPEN"] = fd.avg_ar > ASPECT_RATIO_THRESHOLD
  
     if fd.pose_detected:
         if calib.valid:
@@ -711,7 +711,7 @@ def export_errors_csv(errors: List[TrialError], stance: str, surface: str, path:
 Prompt user to select video and IMU data from file browser.
 Returns the paths.
 """
-def select_video_and_imu():
+def select_video_and_imu(use_imu: bool = True):
     root = tk.Tk()
     root.withdraw()
     video_path = filedialog.askopenfilename(
@@ -719,6 +719,9 @@ def select_video_and_imu():
         filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv")])
     if not video_path:
         raise RuntimeError("No video selected.")
+    # Tripod recordings don't need roll correction; skip the IMU prompt.
+    if not use_imu:
+        return video_path, None
     imu_path = filedialog.askopenfilename(
         title="Select IMU Data File",
         filetypes=[("Text/JSON", "*.txt *.json"), ("All files", "*.*")])
@@ -730,10 +733,14 @@ def select_video_and_imu():
 Wrapper function to call all processing and detection functions.
 Returns the TrialError array.
 """
-def analyze(video_path: str, imu_path: str,
+def analyze(video_path: str, imu_path: Optional[str] = None,
             stance: str = "DOUBLE_LEG", surface: str = "FIRM"):
-    print("Step 0: IMU roll-correcting video...")
-    corrected_path = correct_video(video_path, imu_path)
+    if imu_path is None:
+        print("Step 0: skipping roll correction (no IMU; tripod recording).")
+        corrected_path = video_path
+    else:
+        print("Step 0: IMU roll-correcting video...")
+        corrected_path = correct_video(video_path, imu_path)
  
     print("Step 1: extracting signals (this runs MediaPipe once)...")
     frame_data_list, fps = extract_signals(corrected_path)
@@ -759,6 +766,9 @@ Main wrapper function.
 Calls video selection and analysis functions.
 """
 if __name__ == "__main__":
+    # Set False for tripod recordings (no roll correction needed).
+    # Set True for app recordings (roll correction needed).
+    USE_IMU = False
     # video path, IMU path
-    vp, ip = select_video_and_imu()
+    vp, ip = select_video_and_imu(use_imu=USE_IMU)
     analyze(vp, ip)
