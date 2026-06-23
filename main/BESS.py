@@ -75,8 +75,8 @@ CALIB_START_MS = TRIAL_START_MS - CALIB_WINDOW_S * 1000.0  # e.g. 2.0 s
 CALIB_END_MS   = TRIAL_START_MS                            # e.g. 3.0 s
  
 # An error must persist this long before it's committed (suppresses 1-frame flicker).
-DEBOUNCE_S = 0.20 # 0.2 seconds
-DEBOUNCE_MS = 200 # 200 ms
+DEBOUNCE_S = 0.5 # 0.5 second
+DEBOUNCE_MS = 500 # 500 ms
 
 
 # ==========================================
@@ -592,6 +592,22 @@ def run_detection(frame_data_list: List[FrameData], calib: CalibrationData):
             # in the states dictionary initialized above
             st = states[etype]
             
+            # special case: stumble/sway
+            if etype == "STUMBLE_SWAY":
+                if cond:
+                    if not st.committed:
+                        err = TrialError(error_type=etype, timestamp=t_rel)
+                        errors.append(err)
+                        st.committed = True
+                        st.active = True
+                        st.error_ref = err
+                else:
+                    if st.committed and st.error_ref is not None and st.error_ref.duration == 0.0:
+                        st.error_ref.duration = t_rel - st.error_ref.timestamp
+                    st.active, st.committed, st.error_ref = False, False, None
+                committed_now[etype] = st.committed
+                continue   # skips the generic block below for STUMBLE_SWAY
+            
             # bool was True
             if cond:
                 # if the error is not active, become active
@@ -601,7 +617,7 @@ def run_detection(frame_data_list: List[FrameData], calib: CalibrationData):
                     st.committed = False
                     st.error_ref = None
                     
-                elif not st.committed and (t_rel - st.first_seen) >= DEBOUNCE_S:
+                elif (not st.committed) and (t_rel - st.first_seen) >= DEBOUNCE_S:
                     # add TrialError to errors array
                     err = TrialError(error_type=etype, timestamp=st.first_seen)
                     errors.append(err)
@@ -768,7 +784,7 @@ Calls video selection and analysis functions.
 if __name__ == "__main__":
     # Set False for tripod recordings (no roll correction needed).
     # Set True for app recordings (roll correction needed).
-    USE_IMU = False
+    USE_IMU = True
     # video path, IMU path
     vp, ip = select_video_and_imu(use_imu=USE_IMU)
     analyze(vp, ip)
